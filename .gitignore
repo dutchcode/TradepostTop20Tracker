@@ -11,9 +11,20 @@ __pycache__/
 
 # Virtual Environment
 venv/
+.env
 
 # Logs
 *.log
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# System files
+.DS_Store
+Thumbs.db
 
 # Config files (be careful with sensitive data)
 config.yaml
