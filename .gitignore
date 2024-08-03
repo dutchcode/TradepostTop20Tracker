@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Virtual Environment
+venv/
+
+# Logs
+*.log
+
+# Config files (be careful with sensitive data)
+config.yaml
