@@ -26,11 +26,8 @@ This project implements an automated trading bot that mirrors the Tradepost.ai T
 
 3. Set up your InteractiveBrokers account and ensure you have API access enabled.
 
-4. Sign up for a Tradepost.ai account and obtain your API key:
-   - Go to [Tradepost.ai](https://tradepost.ai) and sign up for an account.
-   - Once logged in, navigate to your account settings or API section to find your API key.
-   - If you're using the 14-day free trial, make sure to note the expiration date.
-
+4. Sign up for a [Tradepost.ai](https://tradepost.ai) account and obtain your API key:
+   
 5. Update the `config.yaml` file with your Tradepost API key and InteractiveBrokers account details.
 
 ## Usage
