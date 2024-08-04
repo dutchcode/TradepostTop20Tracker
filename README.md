@@ -2,6 +2,16 @@
 
 An open-source bot for InteractiveBrokers that tracks the Tradepost.ai Top20 Index.
 
+## ⚠️ WARNING: USE WITH CAUTION ⚠️
+
+**IMPORTANT:** This bot will sell ALL stocks in the connected account that are not part of the Tradepost.ai Top20 Index. 
+
+- **DO NOT** connect this bot to an existing account with active positions unless you fully understand and accept the consequences.
+- **ALWAYS** start with paper trading to familiarize yourself with the bot's behavior.
+- Use a dedicated account for this bot to avoid unintended sales of other positions.
+
+The authors and contributors of this project are not responsible for any financial losses incurred through the use of this bot. Use at your own risk.
+
 ## Description
 
 This project implements an automated trading bot that mirrors the Tradepost.ai Top20 Index using an InteractiveBrokers account. It's designed for educational and demonstration purposes to showcase the practical application of the Tradepost.ai API.
@@ -9,8 +19,12 @@ This project implements an automated trading bot that mirrors the Tradepost.ai T
 ## Prerequisites
 
 1. An InteractiveBrokers account with API access enabled.
-2. A Tradepost.ai account with API access. They offer a 14-day free trial which you can use to obtain an API key.
-3. Python 3.9 or higher installed on your system.
+2. Interactive Brokers Trader Workstation (TWS) or IB Gateway installed and running.
+3. A Tradepost.ai account with API access. They offer a 14-day free trial which you can use to obtain an API key.
+4. Python 3.9 or higher installed on your system.
+5. Fractional shares trading enabled in your InteractiveBrokers account:
+   - Visit the [Fractional Trading](https://www.interactivebrokers.com/en/trading/fractional-trading.php) page on the InteractiveBrokers website.
+   - Follow the instructions to enable fractional shares trading for your account.
 
 ## Installation
 
@@ -52,7 +66,7 @@ The `config.yaml` file contains all the necessary settings for the bot. Here's w
 - `tradepost.api_key`: Your Tradepost.ai API key
 - `interactive_brokers.account`: Your InteractiveBrokers account number
 - `interactive_brokers.host`: Usually "127.0.0.1" for local connections
-- `interactive_brokers.port`: 7497 for TWS paper trading, 4001 for IB Gateway paper trading
+- `interactive_brokers.port`: 7497 for TWS paper trading, 4002 for IB Gateway paper trading
 - `interactive_brokers.client_id`: A unique ID for this client connection
 - `trading.rebalance_frequency`: How often to rebalance the portfolio
 - `trading.cash_buffer`: Amount of cash to keep as a buffer for fees, etc.
@@ -61,7 +75,7 @@ Make sure to keep your `config.yaml` file secure and do not share it publicly, a
 
 ## Usage
 
-1. Make sure your InteractiveBrokers Trader Workstation (TWS) or IB Gateway is running and configured to accept API connections.
+1. Ensure that either Interactive Brokers Trader Workstation (TWS) or IB Gateway is running and configured to accept API connections.
 
 2. Activate your virtual environment if it's not already activated:
    ```

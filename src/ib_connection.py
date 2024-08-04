@@ -2,8 +2,13 @@ from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
 from ibapi.order import Order
+from ibapi.common import BarData
 import threading
 import time
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class IBApi(EWrapper, EClient):
     def __init__(self):
@@ -13,24 +18,18 @@ class IBApi(EWrapper, EClient):
         self.lock = threading.Lock()
         self.account_summary = {}
         self.positions = {}
+        self.contract_details = {}
+        self.historical_data = {}
+        self.event = threading.Event()
 
     def nextValidId(self, orderId: int):
         super().nextValidId(orderId)
         self.nextorderId = orderId
-        print('The next valid order id is: ', self.nextorderId)
+        logger.info(f'The next valid order id is: {self.nextorderId}')
         self.connected = True
 
     def error(self, reqId, errorCode, errorString):
-        print("Error. Id:", reqId, "Code:", errorCode, "Msg:", errorString)
-
-    def orderStatus(self, orderId, status, filled, remaining, avgFullPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice):
-        print("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled, "Remaining:", remaining, "AvgFullPrice:", avgFullPrice)
-
-    def openOrder(self, orderId, contract, order, orderState):
-        print("OpenOrder. ID:", orderId, contract.symbol, contract.secType, "@", contract.exchange, ":", order.action, order.orderType, order.totalQuantity, orderState.status)
-
-    def execDetails(self, reqId, contract, execution):
-        print("ExecDetails. ", reqId, contract.symbol, contract.secType, contract.currency, execution.execId, execution.orderId, execution.shares, execution.lastLiquidity)
+        logger.error(f"Error. Id: {reqId} Code: {errorCode} Msg: {errorString}")
 
     def accountSummary(self, reqId, account, tag, value, currency):
         if tag == "TotalCashValue":
@@ -44,6 +43,23 @@ class IBApi(EWrapper, EClient):
             "avgCost": avgCost
         }
 
+    def contractDetails(self, reqId, contractDetails):
+        if reqId not in self.contract_details:
+            self.contract_details[reqId] = []
+        self.contract_details[reqId].append(contractDetails)
+
+    def contractDetailsEnd(self, reqId):
+        self.event.set()
+
+    def historicalData(self, reqId: int, bar: BarData):
+        if reqId not in self.historical_data:
+            self.historical_data[reqId] = []
+        self.historical_data[reqId].append(bar)
+
+    def historicalDataEnd(self, reqId: int, start: str, end: str):
+        self.event.set()
+
+
 class IBConnection:
     def __init__(self, host, port, clientId):
         self.host = host
@@ -51,6 +67,7 @@ class IBConnection:
         self.clientId = clientId
         self.ib = IBApi()
         self.ib_thread = None
+        self.next_req_id = 1
 
     def connect(self):
         self.ib.connect(self.host, self.port, self.clientId)
@@ -66,6 +83,46 @@ class IBConnection:
 
     def run_loop(self):
         self.ib.run()
+
+    def get_market_price(self, isin, symbol):
+        contract = Contract()
+        contract.symbol = symbol
+        contract.secType = "STK"
+        contract.currency = "USD"
+        contract.isin = isin
+
+        req_id = self.next_req_id
+        self.next_req_id += 1
+
+        # Clear previous data
+        self.ib.contract_details.pop(req_id, None)
+        self.ib.historical_data.pop(req_id, None)
+
+        # Request contract details
+        self.ib.event.clear()
+        self.ib.reqContractDetails(req_id, contract)
+
+        if not self.ib.event.wait(timeout=10):
+            raise TimeoutError(f"Timeout waiting for contract details for {symbol}")
+
+        if req_id not in self.ib.contract_details or not self.ib.contract_details[req_id]:
+            raise ValueError(f"Failed to get contract details for {symbol}")
+
+        # Use the first contract detail
+        contract_details = self.ib.contract_details[req_id][0]
+
+        # Request recent historical data to get the latest price
+        self.ib.event.clear()
+        self.ib.reqHistoricalData(req_id, contract_details.contract, "", "1 D", "1 min", "TRADES", 1, 1, False, [])
+
+        if not self.ib.event.wait(timeout=10):
+            raise TimeoutError(f"Timeout waiting for historical data for {symbol}")
+
+        if req_id not in self.ib.historical_data or not self.ib.historical_data[req_id]:
+            raise ValueError(f"Failed to get historical data for {symbol}")
+
+        latest_bar = self.ib.historical_data[req_id][-1]
+        return float(latest_bar.close)
 
     def place_order(self, symbol, secType, exchange, action, quantity):
         contract = Contract()
@@ -98,26 +155,37 @@ class IBConnection:
         time.sleep(1)  # Wait for the data to be received
         return self.ib.positions
 
+
 # Example usage
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
     from config import CONFIG
 
     ib_config = CONFIG['interactive_brokers']
     ib = IBConnection(ib_config['host'], ib_config['port'], ib_config['client_id'])
     ib.connect()
 
-    # Place a market order for 100 shares of AAPL
-    order_id = ib.place_order("AAPL", "STK", "SMART", "BUY", 100)
-    print(f"Placed order with ID: {order_id}")
+    try:
+        # Get market price for AAPL
+        price = ib.get_market_price("US0378331005", "AAPL")
+        logger.info(f"Current price of AAPL: {price}")
 
-    # Get account summary and positions
-    account_summary = ib.get_account_summary()
-    positions = ib.get_positions()
+        # Place a market order for 1 share of AAPL
+        order_id = ib.place_order("AAPL", "STK", "SMART", "BUY", 1)
+        logger.info(f"Placed order with ID: {order_id}")
 
-    print("Account Summary:", account_summary)
-    print("Positions:", positions)
+        # Get account summary and positions
+        account_summary = ib.get_account_summary()
+        positions = ib.get_positions()
 
-    # Keep the script running to receive callbacks
-    time.sleep(10)
+        logger.info(f"Account Summary: {account_summary}")
+        logger.info(f"Positions: {positions}")
 
-    ib.disconnect()
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+
+    finally:
+        # Disconnect from IB
+        ib.disconnect()
+        logger.info("Disconnected from Interactive Brokers")

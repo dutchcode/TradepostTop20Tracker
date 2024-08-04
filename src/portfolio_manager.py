@@ -1,110 +1,114 @@
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
+import logging
+from config import CONFIG
 
+logger = logging.getLogger(__name__)
 
 class PortfolioManager:
     def __init__(self, ib_connection):
         self.ib_connection = ib_connection
-        self.CASH_BUFFER = 50  # Buffer in USD/EUR for transaction costs
+        self.CASH_BUFFER = Decimal(str(CONFIG['trading']['cash_buffer']))
+        self.ACCOUNT = CONFIG['interactive_brokers']['account']
 
     def get_current_portfolio(self):
         positions = self.ib_connection.get_positions()
         account_summary = self.ib_connection.get_account_summary()
 
         portfolio = {
-            'CASH': account_summary.get('cash', 0)
+            'CASH': Decimal(str(account_summary.get('cash', 0)))
         }
 
         for symbol, details in positions.items():
             portfolio[symbol] = {
-                'shares': details['shares'],
-                'price': details['avgCost']
+                'shares': Decimal(str(details['shares'])),
+                'price': Decimal(str(details['avgCost']))
             }
 
+        logger.info(f"Current portfolio: {portfolio}")
         return portfolio
 
     def get_total_portfolio_value(self, portfolio):
-        return sum(stock['shares'] * stock['price'] for stock in portfolio.values() if stock != 'CASH') + portfolio[
-            'CASH']
+        try:
+            return sum(stock['shares'] * stock['price']
+                       for symbol, stock in portfolio.items() if symbol != 'CASH') + portfolio['CASH']
+        except InvalidOperation as e:
+            logger.error(f"Error calculating total portfolio value: {e}")
+            logger.debug(f"Portfolio data: {portfolio}")
+            raise
 
     def calculate_rebalance_orders(self, current_portfolio, new_top20):
-        total_value = self.get_total_portfolio_value(current_portfolio)
-        target_position_value = Decimal(total_value) / 20  # Value for each position if equally distributed
+        try:
+            total_value = self.get_total_portfolio_value(current_portfolio)
+            target_position_value = (total_value - self.CASH_BUFFER) / Decimal('20')
 
-        sell_orders = []
-        buy_orders = []
+            sell_orders = []
+            buy_orders = []
 
-        # Identify stocks to sell (not in new top 20)
-        for symbol, details in current_portfolio.items():
-            if symbol != 'CASH' and symbol not in new_top20:
-                sell_orders.append({
-                    'symbol': symbol,
-                    'action': 'SELL',
-                    'shares': details['shares']
-                })
+            logger.debug(f"Current portfolio: {current_portfolio}")
+            logger.debug(f"New top 20: {new_top20}")
 
-        # Calculate available cash after selling
-        cash_after_selling = current_portfolio['CASH'] + sum(
-            current_portfolio[order['symbol']]['shares'] * current_portfolio[order['symbol']]['price']
-            for order in sell_orders
-        )
-
-        # Identify stocks to buy or add to
-        for symbol in new_top20:
-            if symbol not in current_portfolio or current_portfolio[symbol]['shares'] == 0:
-                # New stock to buy
-                cash_to_use = min(cash_after_selling - self.CASH_BUFFER, target_position_value)
-                shares_to_buy = int(
-                    (cash_to_use / Decimal(new_top20[symbol]['price'])).quantize(Decimal('1.'), rounding=ROUND_DOWN))
-
-                if shares_to_buy > 0:
-                    buy_orders.append({
+            # Identify stocks to sell (not in new top 20)
+            for symbol, details in current_portfolio.items():
+                if symbol != 'CASH' and symbol not in new_top20:
+                    sell_orders.append({
                         'symbol': symbol,
-                        'action': 'BUY',
-                        'shares': shares_to_buy
+                        'action': 'SELL',
+                        'shares': details['shares']
                     })
-                    cash_after_selling -= shares_to_buy * Decimal(new_top20[symbol]['price'])
 
-        return sell_orders, buy_orders
+            # Calculate available cash after selling
+            cash_after_selling = current_portfolio['CASH'] + sum(
+                current_portfolio[order['symbol']]['shares'] * current_portfolio[order['symbol']]['price']
+                for order in sell_orders
+            )
+
+            # Identify stocks to buy or add to
+            valid_new_stocks = [symbol for symbol, details in new_top20.items() if details.get('price') is not None]
+            if not valid_new_stocks:
+                logger.warning("No stocks with valid price information in new Top20. Skipping buy orders.")
+                return sell_orders, []
+
+            cash_per_new_stock = (cash_after_selling - self.CASH_BUFFER) / Decimal(str(len(valid_new_stocks)))
+
+            for symbol in valid_new_stocks:
+                details = new_top20[symbol]
+                price = Decimal(str(details['price']))
+                if symbol not in current_portfolio or current_portfolio[symbol]['shares'] == 0:
+                    # New stock to buy
+                    shares_to_buy = min(
+                        (cash_per_new_stock / price).quantize(Decimal('0.0001'), rounding=ROUND_DOWN),
+                        (target_position_value / price).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
+                    )
+
+                    if shares_to_buy > Decimal('0'):
+                        buy_orders.append({
+                            'symbol': symbol,
+                            'action': 'BUY',
+                            'shares': shares_to_buy
+                        })
+                        cash_after_selling -= shares_to_buy * price
+
+            logger.info(f"Sell orders: {sell_orders}")
+            logger.info(f"Buy orders: {buy_orders}")
+
+            return sell_orders, buy_orders
+
+        except InvalidOperation as e:
+            logger.error(f"Error in calculate_rebalance_orders: {e}")
+            logger.debug(f"Current portfolio: {current_portfolio}")
+            logger.debug(f"New top 20: {new_top20}")
+            raise
 
     def execute_orders(self, orders):
         for order in orders:
-            self.ib_connection.place_order(
-                symbol=order['symbol'],
-                secType='STK',
-                exchange='SMART',
-                action=order['action'],
-                quantity=order['shares']
-            )
-
-
-# Example usage
-if __name__ == "__main__":
-    from ib_connection import IBConnection
-    from config import CONFIG
-
-    ib_config = CONFIG['interactive_brokers']
-    ib = IBConnection(ib_config['host'], ib_config['port'], ib_config['client_id'])
-    ib.connect()
-
-    pm = PortfolioManager(ib)
-    current_portfolio = pm.get_current_portfolio()
-    print("Current Portfolio:", current_portfolio)
-
-    # Mock new Top 20 data
-    mock_new_top20 = {
-        'AAPL': {'price': 155},
-        'MSFT': {'price': 300},
-        'AMZN': {'price': 3300},
-        # ... (add more stocks to make it 20)
-    }
-
-    sell_orders, buy_orders = pm.calculate_rebalance_orders(current_portfolio, mock_new_top20)
-
-    print("Sell Orders:", sell_orders)
-    print("Buy Orders:", buy_orders)
-
-    # Uncomment these lines to actually execute the orders
-    # pm.execute_orders(sell_orders)
-    # pm.execute_orders(buy_orders)
-
-    ib.disconnect()
+            try:
+                self.ib_connection.place_order(
+                    symbol=order['symbol'],
+                    secType='STK',
+                    exchange='SMART',
+                    action=order['action'],
+                    quantity=float(order['shares'])  # Convert Decimal to float for IB API
+                )
+                logger.info(f"Executed order: {order}")
+            except Exception as e:
+                logger.error(f"Failed to execute order {order}: {e}")
