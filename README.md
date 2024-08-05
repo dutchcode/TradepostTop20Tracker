@@ -68,7 +68,6 @@ The `config.yaml` file contains all the necessary settings for the bot. Here's w
 - `interactive_brokers.host`: Usually "127.0.0.1" for local connections
 - `interactive_brokers.port`: 7497 for TWS paper trading, 4002 for IB Gateway paper trading
 - `interactive_brokers.client_id`: A unique ID for this client connection
-- `trading.rebalance_frequency`: How often to rebalance the portfolio
 - `trading.cash_buffer`: Amount of cash to keep as a buffer for fees, etc.
 
 Make sure to keep your `config.yaml` file secure and do not share it publicly, as it contains sensitive information.
@@ -94,7 +93,7 @@ Make sure to keep your `config.yaml` file secure and do not share it publicly, a
 To update all packages to their latest versions, you can use the following command:
 
 ```
-pip list --outdated | cut -d ' ' -f 1 | xargs -n1 pip install -U
+pip list --outdated --format=json | ConvertFrom-Json | ForEach-Object { pip install --upgrade $_.name }
 ```
 
 After updating packages, make sure to test the bot thoroughly as new versions might introduce breaking changes.
