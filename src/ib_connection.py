@@ -199,19 +199,19 @@ class IBConnection:
         order = Order()
         order.action = action
         order.orderType = "MKT"
-
-        if isinstance(quantity, float) and not quantity.is_integer():
-            order.totalQuantity = quantity
-            order.cashQty = None
-        else:
-            order.totalQuantity = int(quantity)
+        order.totalQuantity = float(quantity)  # Convert Decimal to float
 
         with self.ib.lock:
             orderId = self.ib.nextorderId
             self.ib.nextorderId += 1
 
-        self.ib.placeOrder(orderId, contract, order)
-        return orderId
+        try:
+            self.ib.placeOrder(orderId, contract, order)
+            logger.info(f"Order placed: {symbol} {action} {quantity}")
+            return orderId
+        except Exception as e:
+            logger.error(f"Error placing order: {e}")
+            return None
 
     def get_account_summary(self):
         self.ib.account_summary = {}

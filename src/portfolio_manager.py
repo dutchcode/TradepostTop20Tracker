@@ -102,28 +102,35 @@ class PortfolioManager:
     def execute_orders(self, orders):
         for order in orders:
             try:
-                self.ib_connection.place_order(
+                order_id = self.ib_connection.place_order(
                     symbol=order['symbol'],
                     secType='STK',
                     exchange='SMART',
                     action=order['action'],
                     quantity=float(order['shares'])  # Keep as float for fractional orders
                 )
-                logger.info(f"Executed order: {order}")
+                if order_id:
+                    logger.info(f"Executed order: {order}")
+                else:
+                    raise Exception("Order placement failed")
             except Exception as e:
                 if "10243" in str(e):  # Fractional order error
                     logger.warning(f"Fractional order failed for {order['symbol']}. Attempting whole number order.")
                     rounded_shares = round(float(order['shares']))
                     if rounded_shares > 0:
                         try:
-                            self.ib_connection.place_order(
+                            order_id = self.ib_connection.place_order(
                                 symbol=order['symbol'],
                                 secType='STK',
                                 exchange='SMART',
                                 action=order['action'],
                                 quantity=rounded_shares
                             )
-                            logger.info(f"Executed rounded order: {order['symbol']} {order['action']} {rounded_shares}")
+                            if order_id:
+                                logger.info(
+                                    f"Executed rounded order: {order['symbol']} {order['action']} {rounded_shares}")
+                            else:
+                                logger.error(f"Failed to execute rounded order for {order['symbol']}")
                         except Exception as e2:
                             logger.error(f"Failed to execute rounded order {order}: {e2}")
                     else:

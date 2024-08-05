@@ -53,7 +53,7 @@ def get_current_prices(ib, processed_top20):
             time.sleep(1)  # Add a small delay between retries
 
         if ticker not in prices:
-            logger.error(f"Unable to get price for {ticker} ({data['name']}) after all retries")
+            logger.error(f"Unable to get price for {ticker} ({data['name']}) after all retries. Skipping this stock.")
 
     return prices
 
@@ -112,17 +112,23 @@ def main():
                     processed_top20 = process_top20_data(top20_data)
                     logger.debug(f"Processed Top20 data: {processed_top20}")
 
+                    # Get current prices from IB
                     current_prices = get_current_prices(ib, processed_top20)
                     logger.debug(f"Current prices: {current_prices}")
 
-                    for ticker, data in processed_top20.items():
-                        if ticker in current_prices:
-                            data['price'] = current_prices[ticker]
+                    # Filter out stocks without prices
+                    valid_top20 = {ticker: data for ticker, data in processed_top20.items() if ticker in current_prices}
+                    for ticker, data in valid_top20.items():
+                        data['price'] = current_prices[ticker]
 
+                    logger.debug(f"Valid Top20 data with prices: {valid_top20}")
+
+                    # Get current portfolio
                     current_portfolio = pm.get_current_portfolio()
                     logger.info(f"Current portfolio: {current_portfolio}")
 
-                    sell_orders, buy_orders = pm.calculate_rebalance_orders(current_portfolio, processed_top20)
+                    # Calculate rebalance orders
+                    sell_orders, buy_orders = pm.calculate_rebalance_orders(current_portfolio, valid_top20)
 
                     if sell_orders:
                         logger.info(f"Executing sell orders: {sell_orders}")
