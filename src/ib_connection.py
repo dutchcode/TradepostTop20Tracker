@@ -1,3 +1,5 @@
+# ib_connection.py
+
 import threading
 import time
 import logging
@@ -12,7 +14,6 @@ from ibapi.common import BarData, MarketDataTypeEnum
 
 logger = logging.getLogger(__name__)
 
-
 class IBApi(EWrapper, EClient):
     def __init__(self):
         EClient.__init__(self, self)
@@ -25,6 +26,7 @@ class IBApi(EWrapper, EClient):
         self.historical_data = {}
         self.event = threading.Event()
         self.last_price = None
+        self.symbol_search_results = []
 
     def nextValidId(self, orderId: int):
         super().nextValidId(orderId)
@@ -33,16 +35,16 @@ class IBApi(EWrapper, EClient):
         self.connected.set()
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-        if errorCode in [2104, 2106, 2158]:  # Market data connection messages
+        if errorCode in [2104, 2106, 2158]:
             logger.info(f"Connection info: {errorString}")
         elif errorCode == 200 and "No security definition has been found" in errorString:
             logger.warning(f"No security definition found for reqId {reqId}: {errorString}")
-            self.event.set()  # Set the event to prevent timeout
-        elif errorCode == 10168:  # Market data farm connection is inactive but should be available upon demand
+            self.event.set()
+        elif errorCode == 10168:
             logger.info(f"Market data farm connection message: {errorString}")
-        elif errorCode == 10167:  # Historical Market Data Service error
+        elif errorCode == 10167:
             logger.error(f"Historical Market Data Service error for reqId {reqId}: {errorString}")
-            self.event.set()  # Set the event to prevent timeout
+            self.event.set()
         else:
             logger.error(f"Error. Id: {reqId} Code: {errorCode} Msg: {errorString}")
 
@@ -83,16 +85,24 @@ class IBApi(EWrapper, EClient):
             self.last_price = price
         self.event.set()
 
+    def symbolSamples(self, reqId: int, contractDescriptions: list):
+        for contract in contractDescriptions:
+            self.symbol_search_results.append({
+                "symbol": contract.contract.symbol,
+                "exchange": contract.contract.exchange,
+                "currency": contract.contract.currency
+            })
+            logger.info(f"Symbol: {contract.contract.symbol}, Exchange: {contract.contract.exchange}, Currency: {contract.contract.currency}")
+        self.event.set()
 
 class IBConnection:
     EXCHANGE_MAPPING = {
-        "US": ("SMART", "USD"),  # United States
-        "F": ("IBIS", "EUR"),  # Frankfurt
-        "KO": ("KSE", "KRW"),  # Korea Stock Exchange
-        "L": ("LSE", "GBP"),  # London Stock Exchange
-        "T": ("TSE", "JPY"),  # Tokyo Stock Exchange
-        "HK": ("SEHK", "HKD"),  # Hong Kong Stock Exchange
-        # Add more exchanges as needed
+        "US": ("SMART", "USD"),
+        "F": ("IBIS", "EUR"),
+        "KO": ("KSE", "KRW"),
+        "L": ("LSE", "GBP"),
+        "T": ("TSE", "JPY"),
+        "HK": ("SEHK", "HKD"),
     }
 
     def __init__(self, host, port, clientId, api_version):
@@ -108,7 +118,7 @@ class IBConnection:
         self.ib.connect(self.host, self.port, self.clientId)
         self.ib_thread = threading.Thread(target=self.run_loop, daemon=True)
         self.ib_thread.start()
-        if not self.ib.connected.wait(timeout=15):  # Increased timeout to 15 seconds
+        if not self.ib.connected.wait(timeout=15):
             raise TimeoutError("Failed to connect to Interactive Brokers")
         logger.info("Successfully connected to Interactive Brokers")
 
@@ -127,16 +137,32 @@ class IBConnection:
         finally:
             self.ib.connected.clear()
 
+    def search_symbol(self, symbol, exchange):
+        self.ib.symbol_search_results = []
+        self.ib.event.clear()
+        req_id = self.next_req_id
+        self.next_req_id += 1
+
+        self.ib.reqMatchingSymbols(req_id, symbol)
+
+        if not self.ib.event.wait(timeout=10):
+            raise TimeoutError(f"Timeout waiting for symbol search results for {symbol}")
+
+        return self.ib.symbol_search_results
+
     def get_market_price(self, isin, symbol, exchange, name):
+        # First, search for the symbol
+        search_results = self.search_symbol(symbol, exchange)
+        if not search_results:
+            raise ValueError(f"No matching symbols found for {symbol} on {exchange}")
+
         contract = Contract()
         contract.secType = "STK"
         contract.isin = isin
         contract.symbol = symbol
-
         contract.exchange, contract.currency = self.EXCHANGE_MAPPING.get(exchange, ("SMART", "USD"))
 
-        logger.info(
-            f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
+        logger.info(f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
 
         req_id = self.next_req_id
         self.next_req_id += 1
@@ -148,12 +174,10 @@ class IBConnection:
         self.ib.reqContractDetails(req_id, contract)
 
         if not self.ib.event.wait(timeout=10):
-            raise TimeoutError(
-                f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise TimeoutError(f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         if req_id not in self.ib.contract_details or not self.ib.contract_details[req_id]:
-            raise ValueError(
-                f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise ValueError(f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         contract_details = self.ib.contract_details[req_id][0]
         logger.info(f"Found contract: {contract_details.contract}")
@@ -199,7 +223,8 @@ class IBConnection:
         order = Order()
         order.action = action
         order.orderType = "MKT"
-        order.totalQuantity = float(quantity)  # Convert Decimal to float
+        order.totalQuantity = quantity  # Support for fractional shares
+        order.cashQty = None  # Set to None to use shares instead of cash amount
 
         with self.ib.lock:
             orderId = self.ib.nextorderId

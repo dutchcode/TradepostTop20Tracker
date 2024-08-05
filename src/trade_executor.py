@@ -1,4 +1,8 @@
+# trade_executor.py
+
 import logging
+
+logger = logging.getLogger(__name__)
 
 class TradeExecutor:
     def __init__(self, ib_connection):
@@ -12,8 +16,8 @@ class TradeExecutor:
                     secType='STK',
                     exchange='SMART',
                     action=order['action'],
-                    quantity=order['shares']
+                    quantity=order['shares']  # This can now be a fractional number
                 )
-                logging.info(f"Executed order: {order}")
+                logger.info(f"Executed order: {order}")
             except Exception as e:
-                logging.error(f"Failed to execute order {order}: {e}")
+                logger.error(f"Failed to execute order {order}: {e}")
