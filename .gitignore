@@ -28,3 +28,13 @@ Thumbs.db
 
 # Config files (be careful with sensitive data)
 config.yaml
+
+# Ignore compiled Python files
+vendor/**/*.pyc
+
+# Ignore __pycache__ directories
+vendor/**/__pycache__/
+
+# Ignore any other unnecessary files or directories
+vendor/**/*.log
+vendor/**/*.tmp

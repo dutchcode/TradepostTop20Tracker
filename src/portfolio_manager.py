@@ -107,8 +107,26 @@ class PortfolioManager:
                     secType='STK',
                     exchange='SMART',
                     action=order['action'],
-                    quantity=float(order['shares'])  # Convert Decimal to float for IB API
+                    quantity=float(order['shares'])  # Keep as float for fractional orders
                 )
                 logger.info(f"Executed order: {order}")
             except Exception as e:
-                logger.error(f"Failed to execute order {order}: {e}")
+                if "10243" in str(e):  # Fractional order error
+                    logger.warning(f"Fractional order failed for {order['symbol']}. Attempting whole number order.")
+                    rounded_shares = round(float(order['shares']))
+                    if rounded_shares > 0:
+                        try:
+                            self.ib_connection.place_order(
+                                symbol=order['symbol'],
+                                secType='STK',
+                                exchange='SMART',
+                                action=order['action'],
+                                quantity=rounded_shares
+                            )
+                            logger.info(f"Executed rounded order: {order['symbol']} {order['action']} {rounded_shares}")
+                        except Exception as e2:
+                            logger.error(f"Failed to execute rounded order {order}: {e2}")
+                    else:
+                        logger.warning(f"Skipped order for {order['symbol']} due to rounding to zero shares")
+                else:
+                    logger.error(f"Failed to execute order {order}: {e}")

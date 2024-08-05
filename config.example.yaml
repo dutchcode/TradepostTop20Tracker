@@ -6,6 +6,7 @@ interactive_brokers:
   host: "127.0.0.1"
   port: 7497  # Use 7497 for TWS paper trading, 4002 for IB Gateway paper trading
   client_id: 1
+  api_version: 163
 
 trading:
   cash_buffer: 50  # Buffer in USD/EUR for transaction costs

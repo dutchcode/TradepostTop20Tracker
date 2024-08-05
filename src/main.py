@@ -1,5 +1,7 @@
 import time
 import logging
+from utils.import_helper import add_vendor_to_path
+add_vendor_to_path()
 from config import CONFIG
 from tradepost_api import TradepostAPI
 from ib_connection import IBConnection
@@ -9,7 +11,6 @@ from datetime import datetime, timedelta
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 def process_top20_data(data):
     logger.debug(f"Raw Top20 data: {data}")
@@ -33,34 +34,32 @@ def process_top20_data(data):
     logger.debug(f"Processed Top20 data: {processed_data}")
     return processed_data
 
-
 def get_current_prices(ib, processed_top20):
+    prices = {}
     for ticker, data in processed_top20.items():
         retries = 3
         while retries > 0:
             try:
-                price = ib.get_market_price(data['isin'], ticker)
-                data['price'] = price
-                logger.info(f"Got price for {ticker}: {price}")
+                price = ib.get_market_price(data['isin'], ticker, data['exchange'], data['name'])
+                prices[ticker] = price
+                logger.info(f"Got price for {ticker} ({data['name']}): {price}")
                 break
             except TimeoutError as e:
-                logger.warning(f"Timeout getting price for {ticker}. Retries left: {retries - 1}")
+                logger.warning(f"Timeout getting price for {ticker} ({data['name']}). Retries left: {retries - 1}")
                 retries -= 1
             except Exception as e:
-                logger.error(f"Failed to get price for {ticker}: {e}")
+                logger.error(f"Failed to get price for {ticker} ({data['name']}): {e}")
                 retries -= 1
             time.sleep(1)  # Add a small delay between retries
 
-        if 'price' not in data:
-            logger.error(f"Unable to get price for {ticker} after all retries")
+        if ticker not in prices:
+            logger.error(f"Unable to get price for {ticker} ({data['name']}) after all retries")
 
-    return processed_top20
-
+    return prices
 
 def main():
     logger.info("Starting the TradepostTop20Tracker")
 
-    # Check if the required configuration is present
     if 'tradepost' not in CONFIG or 'api_key' not in CONFIG['tradepost']:
         logger.error("Tradepost API key not found in configuration")
         return
@@ -73,14 +72,13 @@ def main():
         return
 
     ib_config = CONFIG['interactive_brokers']
-    ib = IBConnection(ib_config['host'], ib_config['port'], ib_config['client_id'])
+    ib = IBConnection(ib_config['host'], ib_config['port'], ib_config['client_id'], ib_config['api_version'])
     pm = PortfolioManager(ib)
 
     retry_delay = 300  # 5 minutes
     max_retries = 3
 
     try:
-        # Test TradepostAPI
         logger.info("Testing TradepostAPI connection...")
         try:
             top20_data = tradepost.get_top20()
@@ -90,41 +88,42 @@ def main():
             logger.error(f"Failed to fetch Top20 data: {e}")
             return  # Exit if we can't connect to Tradepost API
 
-        # Connect to Interactive Brokers
         logger.info("Attempting to connect to Interactive Brokers")
         try:
             ib.connect()
-            logger.info("Connected to Interactive Brokers")
-        except Exception as e:
+        except TimeoutError as e:
             logger.error(f"Failed to connect to Interactive Brokers: {e}")
             return  # Exit if we can't connect to IB
+        except Exception as e:
+            logger.error(f"An error occurred while connecting to Interactive Brokers: {e}")
+            return  # Exit if we can't connect to IB
 
-        # Main trading loop
         while True:
             retries = 0
             while retries < max_retries:
                 try:
-                    # Fetch the latest Top20 data
+                    if not ib.ib.isConnected():
+                        logger.error("Lost connection to Interactive Brokers. Attempting to reconnect...")
+                        ib.connect()
+
                     top20_data = tradepost.get_top20()
                     logger.info(f"Fetched Top20 data for date: {top20_data['date']}")
 
-                    # Process the Top20 data
                     processed_top20 = process_top20_data(top20_data)
                     logger.debug(f"Processed Top20 data: {processed_top20}")
 
-                    # Get current prices from IB
-                    processed_top20_with_prices = get_current_prices(ib, processed_top20)
-                    logger.debug(f"Top20 data with prices: {processed_top20_with_prices}")
+                    current_prices = get_current_prices(ib, processed_top20)
+                    logger.debug(f"Current prices: {current_prices}")
 
-                    # Get current portfolio
+                    for ticker, data in processed_top20.items():
+                        if ticker in current_prices:
+                            data['price'] = current_prices[ticker]
+
                     current_portfolio = pm.get_current_portfolio()
                     logger.info(f"Current portfolio: {current_portfolio}")
 
-                    # Calculate rebalance orders
-                    sell_orders, buy_orders = pm.calculate_rebalance_orders(current_portfolio,
-                                                                            processed_top20_with_prices)
+                    sell_orders, buy_orders = pm.calculate_rebalance_orders(current_portfolio, processed_top20)
 
-                    # Execute orders
                     if sell_orders:
                         logger.info(f"Executing sell orders: {sell_orders}")
                         pm.execute_orders(sell_orders)
@@ -132,6 +131,8 @@ def main():
                     if buy_orders:
                         logger.info(f"Executing buy orders: {buy_orders}")
                         pm.execute_orders(buy_orders)
+
+                    time.sleep(1)
 
                     break  # Exit the retry loop if successful
                 except Exception as e:
@@ -143,7 +144,6 @@ def main():
                     else:
                         logger.error(f"Max retries reached. Skipping this iteration.")
 
-            # Calculate time until next trading day
             now = datetime.now()
             next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             sleep_seconds = (next_run - now).total_seconds()
@@ -158,8 +158,6 @@ def main():
     finally:
         logger.info("Disconnecting from Interactive Brokers")
         ib.disconnect()
-        logger.info("Disconnected from Interactive Brokers")
-
 
 if __name__ == "__main__":
     main()

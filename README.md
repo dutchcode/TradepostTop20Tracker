@@ -25,6 +25,9 @@ This project implements an automated trading bot that mirrors the Tradepost.ai T
 5. Fractional shares trading enabled in your InteractiveBrokers account:
    - Visit the [Fractional Trading](https://www.interactivebrokers.com/en/trading/fractional-trading.php) page on the InteractiveBrokers website.
    - Follow the instructions to enable fractional shares trading for your account.
+6. TWS/IB Gateway settings: 
+   - [x] Enable ActiveX and Socket Clients
+   - [ ] Read-Only API
 
 ## Installation
 
@@ -58,6 +61,19 @@ This project implements an automated trading bot that mirrors the Tradepost.ai T
      cp config.example.yaml config.yaml
      ```
    - Open `config.yaml` and fill in your actual values for the Tradepost API key, InteractiveBrokers account details, and other settings.
+
+## IBAPI Integration
+
+This project includes the Interactive Brokers API (IBAPI) version 10.30.1 in the `vendor/ibapi` directory. This ensures compatibility and ease of setup across different environments.
+
+If you need to update the IBAPI version:
+
+1. Download the new version from the [Interactive Brokers website](https://interactivebrokers.github.io/).
+2. Extract the `ibapi` folder from the downloaded package.
+3. Replace the contents of `vendor/ibapi` with the new version.
+4. Update this README to reflect the new version number.
+
+Note: Always test thoroughly after updating the IBAPI version, as changes may affect the functionality of this project.
 
 ## Configuration
 
