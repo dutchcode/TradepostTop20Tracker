@@ -3,6 +3,8 @@
 import threading
 import time
 import logging
+from datetime import datetime, timedelta
+import pytz
 from utils.import_helper import add_vendor_to_path
 
 add_vendor_to_path()
@@ -13,6 +15,7 @@ from ibapi.order import Order
 from ibapi.common import BarData, MarketDataTypeEnum
 
 logger = logging.getLogger(__name__)
+
 
 class IBApi(EWrapper, EClient):
     def __init__(self):
@@ -27,6 +30,7 @@ class IBApi(EWrapper, EClient):
         self.event = threading.Event()
         self.last_price = None
         self.symbol_search_results = []
+        self.server_time = None
 
     def nextValidId(self, orderId: int):
         super().nextValidId(orderId)
@@ -39,6 +43,9 @@ class IBApi(EWrapper, EClient):
             logger.info(f"Connection info: {errorString}")
         elif errorCode == 200 and "No security definition has been found" in errorString:
             logger.warning(f"No security definition found for reqId {reqId}: {errorString}")
+            self.event.set()
+        elif errorCode == 200 and "Invalid exchange" in errorString:
+            logger.warning(f"Invalid exchange for reqId {reqId}: {errorString}")
             self.event.set()
         elif errorCode == 10168:
             logger.info(f"Market data farm connection message: {errorString}")
@@ -92,15 +99,21 @@ class IBApi(EWrapper, EClient):
                 "exchange": contract.contract.exchange,
                 "currency": contract.contract.currency
             })
-            logger.info(f"Symbol: {contract.contract.symbol}, Exchange: {contract.contract.exchange}, Currency: {contract.contract.currency}")
+            logger.info(
+                f"Symbol: {contract.contract.symbol}, Exchange: {contract.contract.exchange}, Currency: {contract.contract.currency}")
         self.event.set()
+
+    def currentTime(self, time):
+        self.server_time = time
+        self.event.set()
+
 
 class IBConnection:
     EXCHANGE_MAPPING = {
         "US": ("SMART", "USD"),
+        "LSE": ("LSEETF", "GBP"),
         "F": ("IBIS", "EUR"),
         "KO": ("KSE", "KRW"),
-        "L": ("LSE", "GBP"),
         "T": ("TSE", "JPY"),
         "HK": ("SEHK", "HKD"),
     }
@@ -113,6 +126,14 @@ class IBConnection:
         self.ib = IBApi()
         self.ib_thread = None
         self.next_req_id = 1
+        self.market_hours = {
+            'US': {'open': (9, 30), 'close': (16, 0), 'timezone': 'America/New_York'},
+            'LSE': {'open': (8, 0), 'close': (16, 30), 'timezone': 'Europe/London'},
+            'F': {'open': (9, 0), 'close': (17, 30), 'timezone': 'Europe/Berlin'},
+            'KO': {'open': (9, 0), 'close': (15, 30), 'timezone': 'Asia/Seoul'},
+            'T': {'open': (9, 0), 'close': (15, 0), 'timezone': 'Asia/Tokyo'},
+            'HK': {'open': (9, 30), 'close': (16, 0), 'timezone': 'Asia/Hong_Kong'},
+        }
 
     def connect(self):
         self.ib.connect(self.host, self.port, self.clientId)
@@ -137,6 +158,64 @@ class IBConnection:
         finally:
             self.ib.connected.clear()
 
+    def is_connected(self):
+        return self.ib.isConnected()
+
+    def ensure_connection(self):
+        if not self.is_connected():
+            logger.warning("IB connection lost. Attempting to reconnect...")
+            self.connect()
+
+    def set_market_data_type(self):
+        self.ib.reqMarketDataType(MarketDataTypeEnum.REALTIME)
+
+    def is_market_open(self, exchange):
+        if exchange not in self.market_hours:
+            logger.warning(f"Unknown exchange: {exchange}. Assuming market is open.")
+            return True
+
+        market_info = self.market_hours[exchange]
+        tz = pytz.timezone(market_info['timezone'])
+        now = datetime.now(tz)
+        open_time = now.replace(hour=market_info['open'][0], minute=market_info['open'][1], second=0, microsecond=0)
+        close_time = now.replace(hour=market_info['close'][0], minute=market_info['close'][1], second=0, microsecond=0)
+
+        return open_time <= now <= close_time
+
+    def is_market_opening_soon(self, exchange, minutes=30):
+        if exchange not in self.market_hours:
+            logger.warning(f"Unknown exchange: {exchange}. Assuming market is not opening soon.")
+            return False
+
+        market_info = self.market_hours[exchange]
+        tz = pytz.timezone(market_info['timezone'])
+        now = datetime.now(tz)
+        open_time = now.replace(hour=market_info['open'][0], minute=market_info['open'][1], second=0, microsecond=0)
+
+        time_until_open = open_time - now
+        return timedelta(minutes=0) <= time_until_open <= timedelta(minutes=minutes)
+
+    def wait_for_market_open(self, exchange):
+        while not self.is_market_open(exchange):
+            if self.is_market_opening_soon(exchange):
+                logger.info(f"Market for {exchange} is opening soon. Waiting for 1 minute before checking again.")
+                time.sleep(60)  # Wait for 1 minute
+            else:
+                logger.info(f"Market for {exchange} is closed. Waiting for 5 minutes before checking again.")
+                time.sleep(300)  # Wait for 5 minutes
+
+    def create_contract(self, symbol, secType, exchange, currency=None, isin=None):
+        contract = Contract()
+        contract.symbol = symbol
+        contract.secType = secType
+        contract.exchange, contract.currency = self.EXCHANGE_MAPPING.get(exchange, ("SMART", "USD"))
+        if currency:
+            contract.currency = currency
+        contract.primaryExchange = self.EXCHANGE_MAPPING.get(exchange, ("SMART", "USD"))[0]
+        if isin:
+            contract.isin = isin
+        return contract
+
     def search_symbol(self, symbol, exchange):
         self.ib.symbol_search_results = []
         self.ib.event.clear()
@@ -151,18 +230,15 @@ class IBConnection:
         return self.ib.symbol_search_results
 
     def get_market_price(self, isin, symbol, exchange, name):
-        # First, search for the symbol
+        self.wait_for_market_open(exchange)
         search_results = self.search_symbol(symbol, exchange)
         if not search_results:
             raise ValueError(f"No matching symbols found for {symbol} on {exchange}")
 
-        contract = Contract()
-        contract.secType = "STK"
-        contract.isin = isin
-        contract.symbol = symbol
-        contract.exchange, contract.currency = self.EXCHANGE_MAPPING.get(exchange, ("SMART", "USD"))
+        contract = self.create_contract(symbol, "STK", exchange, isin=isin)
 
-        logger.info(f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
+        logger.info(
+            f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
 
         req_id = self.next_req_id
         self.next_req_id += 1
@@ -174,10 +250,12 @@ class IBConnection:
         self.ib.reqContractDetails(req_id, contract)
 
         if not self.ib.event.wait(timeout=10):
-            raise TimeoutError(f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise TimeoutError(
+                f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         if req_id not in self.ib.contract_details or not self.ib.contract_details[req_id]:
-            raise ValueError(f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise ValueError(
+                f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         contract_details = self.ib.contract_details[req_id][0]
         logger.info(f"Found contract: {contract_details.contract}")
@@ -214,17 +292,14 @@ class IBConnection:
             raise ValueError(f"Failed to get market data for {contract.symbol}")
 
     def place_order(self, symbol, secType, exchange, action, quantity):
-        contract = Contract()
-        contract.symbol = symbol
-        contract.secType = secType
-        contract.exchange = exchange
-        contract.currency = "USD"
+        self.wait_for_market_open(exchange)
+        contract = self.create_contract(symbol, secType, exchange)
 
         order = Order()
         order.action = action
         order.orderType = "MKT"
-        order.totalQuantity = quantity  # Support for fractional shares
-        order.cashQty = None  # Set to None to use shares instead of cash amount
+        order.totalQuantity = float(quantity)  # Convert Decimal to float
+        order.cashQty = None
 
         with self.ib.lock:
             orderId = self.ib.nextorderId
@@ -241,11 +316,32 @@ class IBConnection:
     def get_account_summary(self):
         self.ib.account_summary = {}
         self.ib.reqAccountSummary(1, "All", "TotalCashValue,NetLiquidation")
-        time.sleep(1)  # Wait for the data to be received
+        time.sleep(1)
         return self.ib.account_summary
 
     def get_positions(self):
         self.ib.positions = {}
         self.ib.reqPositions()
-        time.sleep(1)  # Wait for the data to be received
+        time.sleep(1)
         return self.ib.positions
+
+    def cancel_all_orders(self):
+        self.ib.reqGlobalCancel()
+
+    def get_ib_server_time(self):
+        self.ib.event.clear()
+        self.ib.reqCurrentTime()
+        if not self.ib.event.wait(timeout=10):
+            raise TimeoutError("Timeout waiting for server time")
+        return self.ib.server_time
+
+    def validate_contract(self, contract):
+        req_id = self.next_req_id
+        self.next_req_id += 1
+        self.ib.event.clear()
+        self.ib.reqContractDetails(req_id, contract)
+        if not self.ib.event.wait(timeout=10):
+            raise TimeoutError(f"Timeout waiting for contract details for {contract.symbol}")
+        if req_id not in self.ib.contract_details or not self.ib.contract_details[req_id]:
+            raise ValueError(f"Invalid contract: {contract.symbol}")
+        return self.ib.contract_details[req_id][0].contract

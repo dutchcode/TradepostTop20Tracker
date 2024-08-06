@@ -8,16 +8,18 @@ class TradeExecutor:
     def __init__(self, ib_connection):
         self.ib_connection = ib_connection
 
-    def execute_orders(self, orders):
-        for order in orders:
-            try:
-                self.ib_connection.place_order(
-                    symbol=order['symbol'],
-                    secType='STK',
-                    exchange='SMART',
-                    action=order['action'],
-                    quantity=order['shares']  # This can now be a fractional number
-                )
+    def execute_order(self, order):
+        try:
+            order_id = self.ib_connection.place_order(
+                symbol=order['symbol'],
+                secType='STK',
+                exchange=order.get('exchange', 'SMART'),
+                action=order['action'],
+                quantity=float(order['shares'])
+            )
+            if order_id:
                 logger.info(f"Executed order: {order}")
-            except Exception as e:
-                logger.error(f"Failed to execute order {order}: {e}")
+            else:
+                logger.error(f"Failed to execute order: {order}")
+        except Exception as e:
+            logger.error(f"Error executing order {order}: {e}")
