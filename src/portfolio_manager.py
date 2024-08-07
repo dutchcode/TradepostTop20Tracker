@@ -1,31 +1,44 @@
-from decimal import Decimal, ROUND_DOWN, InvalidOperation
+# portfolio_manager.py
+
 import logging
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
+from utils.import_helper import add_vendor_to_path
+
+add_vendor_to_path()
+
 from config import CONFIG
 
 logger = logging.getLogger(__name__)
 
+
 class PortfolioManager:
-    def __init__(self, ib_connection):
-        self.ib_connection = ib_connection
-        self.CASH_BUFFER = Decimal(str(CONFIG['trading']['cash_buffer']))
-        self.ACCOUNT = CONFIG['interactive_brokers']['account']
+    def __init__(self, broker):
+        self.broker = broker
+        self.CASH_BUFFER = Decimal(str(CONFIG.get('trading.cash_buffer', '50')))
+        self.ACCOUNT = CONFIG.get('interactive_brokers.account')
+        self.MAX_POSITION_SIZE = Decimal(
+            str(CONFIG.get('trading.max_position_size', '0.1')))  # 10% of portfolio by default
 
     def get_current_portfolio(self):
-        positions = self.ib_connection.get_positions()
-        account_summary = self.ib_connection.get_account_summary()
+        try:
+            positions = self.broker.get_positions()
+            account_summary = self.broker.get_account_summary()
 
-        portfolio = {
-            'CASH': Decimal(str(account_summary.get('cash', 0)))
-        }
-
-        for symbol, details in positions.items():
-            portfolio[symbol] = {
-                'shares': Decimal(str(details['shares'])),
-                'price': Decimal(str(details['avgCost']))
+            portfolio = {
+                'CASH': Decimal(str(account_summary.get('cash', 0)))
             }
 
-        logger.info(f"Current portfolio: {portfolio}")
-        return portfolio
+            for symbol, details in positions.items():
+                portfolio[symbol] = {
+                    'shares': Decimal(str(details['shares'])),
+                    'price': Decimal(str(details['avgCost']))
+                }
+
+            logger.info(f"Current portfolio: {portfolio}")
+            return portfolio
+        except Exception as e:
+            logger.error(f"Error getting current portfolio: {e}")
+            raise
 
     def get_total_portfolio_value(self, portfolio):
         try:
@@ -39,7 +52,8 @@ class PortfolioManager:
     def calculate_rebalance_orders(self, current_portfolio, new_top20):
         try:
             total_value = self.get_total_portfolio_value(current_portfolio)
-            target_position_value = (total_value - self.CASH_BUFFER) / Decimal('20')
+            target_position_value = min((total_value - self.CASH_BUFFER) / Decimal('20'),
+                                        total_value * self.MAX_POSITION_SIZE)
 
             sell_orders = []
             buy_orders = []
@@ -68,18 +82,16 @@ class PortfolioManager:
                 logger.warning("No stocks with valid price information in new Top20. Skipping buy orders.")
                 return sell_orders, []
 
-            cash_per_new_stock = (cash_after_selling - self.CASH_BUFFER) / Decimal(str(len(valid_new_stocks)))
-
             for symbol in valid_new_stocks:
                 details = new_top20[symbol]
                 price = Decimal(str(details['price']))
-                if symbol not in current_portfolio or current_portfolio[symbol]['shares'] == 0:
-                    # New stock to buy
-                    shares_to_buy = min(
-                        (cash_per_new_stock / price).quantize(Decimal('0.0001'), rounding=ROUND_DOWN),
-                        (target_position_value / price).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    )
+                current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
+                current_value = current_shares * price
+                target_value = min(target_position_value, cash_after_selling / len(valid_new_stocks))
 
+                if current_value < target_value:
+                    shares_to_buy = ((target_value - current_value) / price).quantize(Decimal('0.0001'),
+                                                                                      rounding=ROUND_DOWN)
                     if shares_to_buy > Decimal('0'):
                         buy_orders.append({
                             'symbol': symbol,
@@ -87,6 +99,16 @@ class PortfolioManager:
                             'shares': shares_to_buy
                         })
                         cash_after_selling -= shares_to_buy * price
+                elif current_value > target_value:
+                    shares_to_sell = ((current_value - target_value) / price).quantize(Decimal('0.0001'),
+                                                                                       rounding=ROUND_DOWN)
+                    if shares_to_sell > Decimal('0'):
+                        sell_orders.append({
+                            'symbol': symbol,
+                            'action': 'SELL',
+                            'shares': shares_to_sell
+                        })
+                        cash_after_selling += shares_to_sell * price
 
             logger.info(f"Sell orders: {sell_orders}")
             logger.info(f"Buy orders: {buy_orders}")
@@ -98,42 +120,83 @@ class PortfolioManager:
             logger.debug(f"Current portfolio: {current_portfolio}")
             logger.debug(f"New top 20: {new_top20}")
             raise
+        except Exception as e:
+            logger.error(f"Unexpected error in calculate_rebalance_orders: {e}")
+            raise
 
-    def execute_orders(self, orders):
-        for order in orders:
-            try:
-                order_id = self.ib_connection.place_order(
-                    symbol=order['symbol'],
-                    secType='STK',
-                    exchange='SMART',
-                    action=order['action'],
-                    quantity=float(order['shares'])  # Keep as float for fractional orders
-                )
-                if order_id:
-                    logger.info(f"Executed order: {order}")
-                else:
-                    raise Exception("Order placement failed")
-            except Exception as e:
-                if "10243" in str(e):  # Fractional order error
-                    logger.warning(f"Fractional order failed for {order['symbol']}. Attempting whole number order.")
-                    rounded_shares = round(float(order['shares']))
-                    if rounded_shares > 0:
-                        try:
-                            order_id = self.ib_connection.place_order(
-                                symbol=order['symbol'],
-                                secType='STK',
-                                exchange='SMART',
-                                action=order['action'],
-                                quantity=rounded_shares
-                            )
-                            if order_id:
-                                logger.info(
-                                    f"Executed rounded order: {order['symbol']} {order['action']} {rounded_shares}")
-                            else:
-                                logger.error(f"Failed to execute rounded order for {order['symbol']}")
-                        except Exception as e2:
-                            logger.error(f"Failed to execute rounded order {order}: {e2}")
-                    else:
-                        logger.warning(f"Skipped order for {order['symbol']} due to rounding to zero shares")
-                else:
-                    logger.error(f"Failed to execute order {order}: {e}")
+    def execute_order(self, order):
+        try:
+            order_id = self.broker.place_order(
+                symbol=order['symbol'],
+                secType='STK',
+                exchange='SMART',
+                action=order['action'],
+                quantity=float(order['shares'])  # Convert Decimal to float for IB API
+            )
+            if order_id:
+                logger.info(f"Executed order: {order}, Order ID: {order_id}")
+            else:
+                logger.error(f"Failed to execute order: {order}")
+        except Exception as e:
+            logger.error(f"Error executing order {order}: {e}")
+
+    def rebalance_portfolio(self, current_portfolio, new_top20):
+        try:
+            sell_orders, buy_orders = self.calculate_rebalance_orders(current_portfolio, new_top20)
+
+            if sell_orders:
+                logger.info("Executing sell orders")
+                for order in sell_orders:
+                    self.execute_order(order)
+
+            if buy_orders:
+                logger.info("Executing buy orders")
+                for order in buy_orders:
+                    self.execute_order(order)
+
+            logger.info("Portfolio rebalancing completed")
+        except Exception as e:
+            logger.error(f"Error during portfolio rebalancing: {e}")
+
+    def get_portfolio_summary(self):
+        try:
+            portfolio = self.get_current_portfolio()
+            total_value = self.get_total_portfolio_value(portfolio)
+
+            summary = {
+                'total_value': total_value,
+                'cash': portfolio['CASH'],
+                'positions': {}
+            }
+
+            for symbol, details in portfolio.items():
+                if symbol != 'CASH':
+                    position_value = details['shares'] * details['price']
+                    summary['positions'][symbol] = {
+                        'shares': details['shares'],
+                        'price': details['price'],
+                        'value': position_value,
+                        'weight': (position_value / total_value).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
+                    }
+
+            logger.info(f"Portfolio summary: {summary}")
+            return summary
+        except Exception as e:
+            logger.error(f"Error getting portfolio summary: {e}")
+            raise
+
+    def check_risk_limits(self):
+        try:
+            summary = self.get_portfolio_summary()
+
+            for symbol, details in summary['positions'].items():
+                if details['weight'] > self.MAX_POSITION_SIZE:
+                    logger.warning(f"Position {symbol} exceeds maximum allowed size: {details['weight']}")
+
+            cash_ratio = summary['cash'] / summary['total_value']
+            if cash_ratio < Decimal('0.05'):  # Less than 5% cash
+                logger.warning(f"Cash position is low: {cash_ratio:.2%}")
+
+            logger.info("Risk limit check completed")
+        except Exception as e:
+            logger.error(f"Error checking risk limits: {e}")

@@ -1,3 +1,5 @@
+# config.example.yaml
+
 tradepost:
   api_key: "your_api_key_here"
 
@@ -10,3 +12,4 @@ interactive_brokers:
 
 trading:
   cash_buffer: 50  # Buffer in USD/EUR for transaction costs
+  max_position_size: 0.5  # 50% maximum position size
