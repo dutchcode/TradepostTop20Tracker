@@ -126,35 +126,82 @@ class PortfolioManager:
 
     def execute_order(self, order):
         try:
+            exchange = self.broker.EXCHANGE_MAPPING.get(order['symbol'], ('SMART', 'USD'))[0]
+            if not self.broker.is_market_open(exchange):
+                logger.warning(f"Market is closed for {order['symbol']}. Order will be queued: {order}")
+                # Here you could implement a queue for orders to be executed when the market opens
+                return
+
             order_id = self.broker.place_order(
                 symbol=order['symbol'],
                 secType='STK',
                 exchange='SMART',
                 action=order['action'],
-                quantity=float(order['shares'])  # Convert Decimal to float for IB API
+                quantity=float(order['quantity'])
             )
-            if order_id:
+            if order_id is not None:
                 logger.info(f"Executed order: {order}, Order ID: {order_id}")
             else:
-                logger.error(f"Failed to execute order: {order}")
+                logger.error(f"Failed to execute order: {order}. Order ID is None.")
         except Exception as e:
-            logger.error(f"Error executing order {order}: {e}")
+            logger.error(f"Error executing order {order}: {e}", exc_info=True)
+
+    def calculate_and_execute_orders(self, current_prices, cash_available):
+        try:
+            total_value = sum(current_prices.values())
+            target_value_per_stock = min(cash_available / len(current_prices), total_value * self.MAX_POSITION_SIZE)
+
+            queued_orders = []
+            for symbol, price in current_prices.items():
+                quantity = int(target_value_per_stock / price)
+                if quantity > 0:
+                    order = {
+                        'symbol': symbol,
+                        'action': 'BUY',
+                        'quantity': quantity,
+                        'price': price
+                    }
+                    exchange = self.broker.EXCHANGE_MAPPING.get(symbol, ('SMART', 'USD'))[0]
+                    if self.broker.is_market_open(exchange):
+                        self.execute_order(order)
+                    else:
+                        queued_orders.append(order)
+                        logger.info(f"Market closed for {symbol}. Order queued: {order}")
+
+            if queued_orders:
+                logger.info(f"Queued orders for later execution: {queued_orders}")
+                # Here you could implement a mechanism to execute these orders when the market opens
+
+            logger.info(f"Remaining cash after order calculations: {cash_available}")
+            return cash_available
+        except Exception as e:
+            logger.error(f"Error calculating and executing orders: {e}", exc_info=True)
+            raise
 
     def rebalance_portfolio(self, current_portfolio, new_top20):
         try:
-            sell_orders, buy_orders = self.calculate_rebalance_orders(current_portfolio, new_top20)
+            total_value = self.get_total_portfolio_value(current_portfolio)
+            cash_available = current_portfolio['CASH']
 
-            if sell_orders:
-                logger.info("Executing sell orders")
-                for order in sell_orders:
+            # Sell stocks not in new top 20
+            for symbol, details in current_portfolio.items():
+                if symbol != 'CASH' and symbol not in new_top20:
+                    order = {
+                        'symbol': symbol,
+                        'action': 'SELL',
+                        'quantity': details['shares']
+                    }
                     self.execute_order(order)
+                    cash_available += details['shares'] * details['price']
 
-            if buy_orders:
-                logger.info("Executing buy orders")
-                for order in buy_orders:
-                    self.execute_order(order)
+            # Buy or adjust positions for stocks in new top 20
+            remaining_cash = self.calculate_and_execute_orders(
+                {symbol: details['price'] for symbol, details in new_top20.items()},
+                cash_available
+            )
 
             logger.info("Portfolio rebalancing completed")
+            logger.info(f"Remaining cash: {remaining_cash}")
         except Exception as e:
             logger.error(f"Error during portfolio rebalancing: {e}")
 

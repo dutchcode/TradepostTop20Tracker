@@ -14,10 +14,15 @@ from tradepost_api import TradepostAPI
 from broker import IBBroker
 from portfolio_manager import PortfolioManager
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Set root logger to INFO
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Set IBAPI logger to WARNING to reduce its output
+logging.getLogger('ibapi').setLevel(logging.WARNING)
+
+# Keep DEBUG level for your custom logger if needed
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 def process_top20_data(data):
     logger.debug(f"Raw Top20 data: {data}")
@@ -41,26 +46,20 @@ def process_top20_data(data):
     logger.debug(f"Processed Top20 data: {processed_data}")
     return processed_data
 
-
 def get_current_prices(broker, processed_top20):
     prices = {}
     for ticker, data in processed_top20.items():
         retries = 3
         while retries > 0:
             try:
-                if broker.is_market_open(data['exchange']):
-                    price = broker.get_market_price(data['isin'], ticker, data['exchange'], data['name'])
-                    if price is not None:
-                        prices[ticker] = price
-                        logger.info(f"Got price for {ticker} ({data['name']}): {price}")
-                        break
-                    else:
-                        logger.warning(
-                            f"Failed to get price for {ticker} ({data['name']}). Retries left: {retries - 1}")
-                        retries -= 1
-                else:
-                    logger.info(f"Market for {ticker} ({data['exchange']}) is closed. Will retry later.")
+                price = broker.get_market_price(data['isin'], ticker, data['exchange'], data['name'])
+                if price is not None:
+                    prices[ticker] = price
+                    logger.info(f"Got price for {ticker} ({data['name']}): {price}")
                     break
+                else:
+                    logger.warning(f"Failed to get price for {ticker} ({data['name']}). Retries left: {retries - 1}")
+                    retries -= 1
             except Exception as e:
                 logger.error(f"Failed to get price for {ticker} ({data['name']}): {e}")
                 retries -= 1
@@ -71,14 +70,37 @@ def get_current_prices(broker, processed_top20):
 
     return prices
 
+def process_open_markets(broker, processed_top20):
+    open_market_stocks = {}
+    closed_market_stocks = {}
 
-def wait_for_market_open(broker, exchange):
-    while not broker.is_market_open(exchange):
-        next_check = broker.get_next_market_open(exchange)
-        wait_time = (next_check - datetime.now(pytz.utc)).total_seconds()
-        logger.info(f"Market for {exchange} is closed. Next check in {wait_time / 60:.2f} minutes.")
-        time.sleep(min(wait_time, 3600))  # Wait for the calculated time or max 1 hour
+    for ticker, data in processed_top20.items():
+        if broker.is_market_open(data['exchange']):
+            open_market_stocks[ticker] = data
+        else:
+            closed_market_stocks[ticker] = data
 
+    current_prices = get_current_prices(broker, open_market_stocks)
+
+    return current_prices, closed_market_stocks
+
+def get_unique_markets_and_times(processed_top20, broker):
+    unique_markets = set(data['exchange'] for data in processed_top20.values())
+    market_times = {}
+    for market in unique_markets:
+        next_open = broker.get_next_market_open(market)
+        market_times[market] = next_open
+    return market_times
+
+def calculate_quantities(cash, prices, max_position_size):
+    total_value = sum(prices.values())
+    target_value_per_stock = min(cash / len(prices), total_value * max_position_size)
+    quantities = {}
+    for symbol, price in prices.items():
+        quantity = int(target_value_per_stock / price)
+        if quantity > 0:
+            quantities[symbol] = quantity
+    return quantities
 
 def main():
     logger.info("Starting the TradepostTop20Tracker")
@@ -121,37 +143,70 @@ def main():
                     time.sleep(300)  # Wait for 5 minutes before retrying
                     continue
 
-                current_prices = get_current_prices(broker, processed_top20)
-                if not current_prices:
+                # Get unique markets and their opening times
+                market_times = get_unique_markets_and_times(processed_top20, broker)
+
+                # Display current UTC time
+                logger.info(f"Current UTC time: {datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+                # Display markets and their opening times
+                logger.info("Markets to check and their next opening times:")
+                for market, open_time in market_times.items():
+                    logger.info(f"{market}: {open_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+                all_prices = {}
+                remaining_stocks = processed_top20
+
+                for exchange in market_times.keys():
+                    current_prices, remaining_stocks = process_open_markets(broker, remaining_stocks)
+                    all_prices.update(current_prices)
+
+                    if not remaining_stocks:
+                        break
+
+                    if current_prices:
+                        # Calculate quantities and place orders for the current market
+                        current_portfolio = pm.get_current_portfolio()
+                        cash_available = current_portfolio['CASH']
+                        quantities = calculate_quantities(cash_available, current_prices, CONFIG.get('trading.max_position_size'))
+
+                        logger.info(f"Placing orders for {exchange} market:")
+                        for symbol, quantity in quantities.items():
+                            if quantity > 0:
+                                order = {
+                                    'symbol': symbol,
+                                    'action': 'BUY',
+                                    'quantity': quantity,
+                                    'price': current_prices[symbol]
+                                }
+                                pm.execute_order(order)
+                                logger.info(f"Placed order: {order}")
+
+                    if remaining_stocks:
+                        next_market_open = min(broker.get_next_market_open(data['exchange'])
+                                               for data in remaining_stocks.values())
+                        wait_time = (next_market_open - datetime.now(pytz.utc)).total_seconds()
+                        next_market = min(remaining_stocks.values(), key=lambda x: broker.get_next_market_open(x['exchange']))['exchange']
+                        logger.info(f"Current UTC time: {datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                        logger.info(f"Waiting for {next_market} market to open. Sleep time: {wait_time / 60:.2f} minutes")
+                        time.sleep(min(wait_time, 3600))  # Wait for the calculated time or max 1 hour
+
+                if not all_prices:
                     logger.warning("No valid prices available. Waiting before retry.")
                     time.sleep(300)  # Wait for 5 minutes
                     continue
-                logger.debug(f"Current prices: {current_prices}")
 
-                valid_top20 = {ticker: data for ticker, data in processed_top20.items() if ticker in current_prices}
+                logger.debug(f"All prices: {all_prices}")
+
+                valid_top20 = {ticker: data for ticker, data in processed_top20.items() if ticker in all_prices}
                 for ticker, data in valid_top20.items():
-                    data['price'] = current_prices[ticker]
+                    data['price'] = all_prices[ticker]
 
                 logger.debug(f"Valid Top20 data with prices: {valid_top20}")
 
-                if not valid_top20:
-                    logger.warning("No valid stocks with prices. Waiting before retry.")
-                    time.sleep(300)  # Wait for 5 minutes before retrying
-                    continue
-
-                current_portfolio = pm.get_current_portfolio()
-                logger.info(f"Current portfolio: {current_portfolio}")
-
-                rebalance_orders = pm.calculate_rebalance_orders(current_portfolio, valid_top20)
-
-                if rebalance_orders:
-                    logger.info(f"Rebalance orders: {rebalance_orders}")
-                    for order in rebalance_orders:
-                        exchange = processed_top20[order['symbol']]['exchange']
-                        wait_for_market_open(broker, exchange)
-                        pm.execute_order(order)
-                else:
-                    logger.info("No rebalancing needed.")
+                # After processing all markets, update the portfolio
+                updated_portfolio = pm.get_current_portfolio()
+                logger.info(f"Updated portfolio: {updated_portfolio}")
 
                 # Wait before the next iteration
                 time.sleep(3600)  # Wait for 1 hour before the next check
@@ -167,7 +222,6 @@ def main():
     finally:
         logger.info("Disconnecting from Interactive Brokers")
         broker.disconnect()
-
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import pytz
 from decimal import Decimal
 from utils.import_helper import add_vendor_to_path
+import exchange_calendars as xcals
+import pandas as pd
 
 add_vendor_to_path()
 from ibapi.client import EClient
@@ -16,6 +18,7 @@ from ibapi.order import Order
 from ibapi.common import BarData, MarketDataTypeEnum
 
 logger = logging.getLogger(__name__)
+
 
 class IBApi(EWrapper, EClient):
     def __init__(self):
@@ -99,12 +102,14 @@ class IBApi(EWrapper, EClient):
                 "exchange": contract.contract.exchange,
                 "currency": contract.contract.currency
             })
-            logger.info(f"Symbol: {contract.contract.symbol}, Exchange: {contract.contract.exchange}, Currency: {contract.contract.currency}")
+            logger.info(
+                f"Symbol: {contract.contract.symbol}, Exchange: {contract.contract.exchange}, Currency: {contract.contract.currency}")
         self.event.set()
 
     def currentTime(self, time):
         self.server_time = time
         self.event.set()
+
 
 class IBBroker:
     EXCHANGE_MAPPING = {
@@ -124,14 +129,7 @@ class IBBroker:
         self.ib = IBApi()
         self.ib_thread = None
         self.next_req_id = 1
-        self.market_hours = {
-            'US': {'open': (9, 30), 'close': (16, 0), 'timezone': 'America/New_York'},
-            'LSE': {'open': (8, 0), 'close': (16, 30), 'timezone': 'Europe/London'},
-            'F': {'open': (9, 0), 'close': (17, 30), 'timezone': 'Europe/Berlin'},
-            'KO': {'open': (9, 0), 'close': (15, 30), 'timezone': 'Asia/Seoul'},
-            'T': {'open': (9, 0), 'close': (15, 0), 'timezone': 'Asia/Tokyo'},
-            'HK': {'open': (9, 30), 'close': (16, 0), 'timezone': 'Asia/Hong_Kong'},
-        }
+        self.market_calendars = {}
 
     def connect(self):
         self.ib.connect(self.host, self.port, self.clientId)
@@ -165,32 +163,32 @@ class IBBroker:
             self.connect()
 
     def is_market_open(self, exchange):
-        if exchange not in self.market_hours:
-            logger.warning(f"Unknown exchange: {exchange}. Assuming market is open.")
-            return True
+        if exchange not in self.market_calendars:
+            calendar_name = self.get_calendar_name(exchange)
+            self.market_calendars[exchange] = xcals.get_calendar(calendar_name)
 
-        market_info = self.market_hours[exchange]
-        tz = pytz.timezone(market_info['timezone'])
-        now = datetime.now(tz)
-        open_time = now.replace(hour=market_info['open'][0], minute=market_info['open'][1], second=0, microsecond=0)
-        close_time = now.replace(hour=market_info['close'][0], minute=market_info['close'][1], second=0, microsecond=0)
-
-        return open_time <= now <= close_time
+        now = pd.Timestamp.now(tz='UTC')
+        return self.market_calendars[exchange].is_open_on_minute(now)
 
     def get_next_market_open(self, exchange):
-        if exchange not in self.market_hours:
-            logger.warning(f"Unknown exchange: {exchange}. Returning current time.")
-            return datetime.now(pytz.utc)
+        if exchange not in self.market_calendars:
+            calendar_name = self.get_calendar_name(exchange)
+            self.market_calendars[exchange] = xcals.get_calendar(calendar_name)
 
-        market_info = self.market_hours[exchange]
-        tz = pytz.timezone(market_info['timezone'])
-        now = datetime.now(tz)
-        open_time = now.replace(hour=market_info['open'][0], minute=market_info['open'][1], second=0, microsecond=0)
+        now = pd.Timestamp.now(tz='UTC')
+        next_open = self.market_calendars[exchange].next_open(now)
+        return next_open.to_pydatetime()
 
-        if now > open_time:
-            open_time += timedelta(days=1)
-
-        return open_time.astimezone(pytz.utc)
+    def get_calendar_name(self, exchange):
+        calendar_mapping = {
+            'US': 'XNYS',  # New York Stock Exchange
+            'LSE': 'XLON',  # London Stock Exchange
+            'F': 'XFRA',  # Frankfurt Stock Exchange
+            'KO': 'XKRX',  # Korea Exchange
+            'T': 'XTKS',  # Tokyo Stock Exchange
+            'HK': 'XHKG',  # Hong Kong Stock Exchange
+        }
+        return calendar_mapping.get(exchange, 'XNYS')  # Default to NYSE if not found
 
     def create_contract(self, symbol, secType, exchange, currency=None, isin=None):
         contract = Contract()
@@ -208,7 +206,8 @@ class IBBroker:
         self.ensure_connection()
         contract = self.create_contract(symbol, "STK", exchange, isin=isin)
 
-        logger.info(f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
+        logger.info(
+            f"Requesting data for: ISIN={isin}, Symbol={symbol}, Exchange={contract.exchange}, Currency={contract.currency}, Name={name}")
 
         req_id = self.next_req_id
         self.next_req_id += 1
@@ -220,27 +219,38 @@ class IBBroker:
         self.ib.reqContractDetails(req_id, contract)
 
         if not self.ib.event.wait(timeout=10):
-            raise TimeoutError(f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise TimeoutError(
+                f"Timeout waiting for contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         if req_id not in self.ib.contract_details or not self.ib.contract_details[req_id]:
-            raise ValueError(f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
+            raise ValueError(
+                f"Failed to get contract details for ISIN: {isin}, Symbol: {symbol}, Exchange: {exchange}, Name: {name}")
 
         contract_details = self.ib.contract_details[req_id][0]
         logger.info(f"Found contract: {contract_details.contract}")
 
-        self.ib.event.clear()
-        self.ib.reqHistoricalData(req_id, contract_details.contract, "", "1 D", "1 min", "TRADES", 1, 1, False, [])
-
-        if not self.ib.event.wait(timeout=10):
-            logger.warning(f"Timeout waiting for historical data. Falling back to market data for {symbol}")
+        # Try to get real-time data first
+        try:
             return self.get_market_data_price(contract_details.contract)
+        except Exception as e:
+            logger.warning(f"Failed to get real-time data for {symbol}: {e}. Trying historical data...")
 
-        if req_id not in self.ib.historical_data or not self.ib.historical_data[req_id]:
-            logger.warning(f"No historical data received. Falling back to market data for {symbol}")
-            return self.get_market_data_price(contract_details.contract)
+        # If real-time data fails, try historical data
+        try:
+            self.ib.event.clear()
+            self.ib.reqHistoricalData(req_id, contract_details.contract, "", "1 D", "1 min", "TRADES", 1, 1, False, [])
 
-        latest_bar = self.ib.historical_data[req_id][-1]
-        return float(latest_bar.close)
+            if not self.ib.event.wait(timeout=10):
+                raise TimeoutError(f"Timeout waiting for historical data for {symbol}")
+
+            if req_id not in self.ib.historical_data or not self.ib.historical_data[req_id]:
+                raise ValueError(f"No historical data received for {symbol}")
+
+            latest_bar = self.ib.historical_data[req_id][-1]
+            return float(latest_bar.close)
+        except Exception as e:
+            logger.error(f"Failed to get historical data for {symbol}: {e}")
+            raise
 
     def get_market_data_price(self, contract):
         req_id = self.next_req_id
@@ -260,25 +270,31 @@ class IBBroker:
             raise ValueError(f"Failed to get market data for {contract.symbol}")
 
     def place_order(self, symbol, secType, exchange, action, quantity):
-        self.ensure_connection()
-        contract = self.create_contract(symbol, secType, exchange)
-
-        order = Order()
-        order.action = action
-        order.orderType = "MKT"
-        order.totalQuantity = float(quantity)  # Convert Decimal to float
-        order.cashQty = None
-
-        with self.ib.lock:
-            orderId = self.ib.nextorderId
-            self.ib.nextorderId += 1
-
         try:
+            self.ensure_connection()
+            contract = self.create_contract(symbol, secType, exchange)
+
+            order = Order()
+            order.action = action
+            order.orderType = "MKT"
+            order.totalQuantity = quantity
+            order.cashQty = 0  # Set this to 0 instead of None
+
+            with self.ib.lock:
+                if self.ib.nextorderId is None:
+                    logger.error("nextorderId is None. Requesting new valid ID.")
+                    self.ib.reqIds(-1)
+                    if not self.ib.connected.wait(timeout=10):
+                        raise TimeoutError("Timeout waiting for nextorderId")
+                orderId = self.ib.nextorderId
+                self.ib.nextorderId += 1
+
+            logger.info(f"Placing order: Symbol={symbol}, Action={action}, Quantity={quantity}, OrderId={orderId}")
             self.ib.placeOrder(orderId, contract, order)
             logger.info(f"Order placed: {symbol} {action} {quantity}")
             return orderId
         except Exception as e:
-            logger.error(f"Error placing order: {e}")
+            logger.error(f"Error placing order: {e}", exc_info=True)
             return None
 
     def get_account_summary(self):
