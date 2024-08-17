@@ -1,10 +1,11 @@
 # main.py
 
-import time
 import logging
-from decimal import Decimal
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
+
 import pytz
+
 from utils.import_helper import add_vendor_to_path
 
 add_vendor_to_path()
@@ -12,7 +13,7 @@ add_vendor_to_path()
 from config import CONFIG
 from tradepost_api import TradepostAPI
 from broker import IBBroker
-from portfolio_manager import PortfolioManager
+import portfolio_manager
 
 # Set root logger to INFO
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -119,7 +120,7 @@ def main():
         return
 
     broker = IBBroker(ib_config['host'], ib_config['port'], ib_config['client_id'], ib_config['api_version'])
-    pm = PortfolioManager(broker)
+    pm = portfolio_manager.PortfolioManager(broker)
 
     try:
         logger.info("Attempting to connect to Interactive Brokers")

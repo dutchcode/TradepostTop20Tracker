@@ -2,22 +2,19 @@
 
 import logging
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from utils.import_helper import add_vendor_to_path
-
-add_vendor_to_path()
-
-from config import CONFIG
 
 logger = logging.getLogger(__name__)
 
 
 class PortfolioManager:
-    def __init__(self, broker):
+    def __init__(self, broker, config):
         self.broker = broker
-        self.CASH_BUFFER = Decimal(str(CONFIG.get('trading.cash_buffer', '50')))
-        self.ACCOUNT = CONFIG.get('interactive_brokers.account')
+        self.CASH_BUFFER = Decimal(str(config.get('trading.cash_buffer', '50')))
+        self.ACCOUNT = config.get('interactive_brokers.account')
         self.MAX_POSITION_SIZE = Decimal(
-            str(CONFIG.get('trading.max_position_size', '0.1')))  # 10% of portfolio by default
+            str(config.get('trading.max_position_size', '0.3')))  # 30% of portfolio by default
+        self.SELL_ORDER_CHECK_INTERVAL = 60  # Check sell order status every 60 seconds
+        self.SELL_ORDER_TIMEOUT = 3600  # Wait for a maximum of 1 hour for sell orders to complete
 
     def get_current_portfolio(self):
         try:
@@ -67,7 +64,9 @@ class PortfolioManager:
                     sell_orders.append({
                         'symbol': symbol,
                         'action': 'SELL',
-                        'shares': details['shares']
+                        'shares': details['shares'],
+                        'orderType': 'LMT',
+                        'lmtPrice': details['price'] * Decimal('0.99')  # Set limit price 1% below current price
                     })
 
             # Calculate available cash after selling
@@ -96,7 +95,9 @@ class PortfolioManager:
                         buy_orders.append({
                             'symbol': symbol,
                             'action': 'BUY',
-                            'shares': shares_to_buy
+                            'shares': shares_to_buy,
+                            'orderType': 'LMT',
+                            'lmtPrice': price * Decimal('1.01')  # Set limit price 1% above current price
                         })
                         cash_after_selling -= shares_to_buy * price
                 elif current_value > target_value:
@@ -106,7 +107,9 @@ class PortfolioManager:
                         sell_orders.append({
                             'symbol': symbol,
                             'action': 'SELL',
-                            'shares': shares_to_sell
+                            'shares': shares_to_sell,
+                            'orderType': 'LMT',
+                            'lmtPrice': price * Decimal('0.99')  # Set limit price 1% below current price
                         })
                         cash_after_selling += shares_to_sell * price
 
@@ -127,123 +130,18 @@ class PortfolioManager:
     def execute_order(self, order):
         try:
             exchange = self.broker.EXCHANGE_MAPPING.get(order['symbol'], ('SMART', 'USD'))[0]
-            if not self.broker.is_market_open(exchange):
-                logger.warning(f"Market is closed for {order['symbol']}. Order will be queued: {order}")
-                # Here you could implement a queue for orders to be executed when the market opens
-                return
+            next_market_open = self.broker.get_next_market_open(exchange)
 
             order_id = self.broker.place_order(
                 symbol=order['symbol'],
                 secType='STK',
                 exchange='SMART',
                 action=order['action'],
-                quantity=float(order['quantity'])
+                quantity=float(order['shares']),
+                order_type=order['orderType'],
+                limit_price=float(order['lmtPrice']),
+                tif='GTC'
             )
+
             if order_id is not None:
-                logger.info(f"Executed order: {order}, Order ID: {order_id}")
-            else:
-                logger.error(f"Failed to execute order: {order}. Order ID is None.")
-        except Exception as e:
-            logger.error(f"Error executing order {order}: {e}", exc_info=True)
-
-    def calculate_and_execute_orders(self, current_prices, cash_available):
-        try:
-            total_value = sum(current_prices.values())
-            target_value_per_stock = min(cash_available / len(current_prices), total_value * self.MAX_POSITION_SIZE)
-
-            queued_orders = []
-            for symbol, price in current_prices.items():
-                quantity = int(target_value_per_stock / price)
-                if quantity > 0:
-                    order = {
-                        'symbol': symbol,
-                        'action': 'BUY',
-                        'quantity': quantity,
-                        'price': price
-                    }
-                    exchange = self.broker.EXCHANGE_MAPPING.get(symbol, ('SMART', 'USD'))[0]
-                    if self.broker.is_market_open(exchange):
-                        self.execute_order(order)
-                    else:
-                        queued_orders.append(order)
-                        logger.info(f"Market closed for {symbol}. Order queued: {order}")
-
-            if queued_orders:
-                logger.info(f"Queued orders for later execution: {queued_orders}")
-                # Here you could implement a mechanism to execute these orders when the market opens
-
-            logger.info(f"Remaining cash after order calculations: {cash_available}")
-            return cash_available
-        except Exception as e:
-            logger.error(f"Error calculating and executing orders: {e}", exc_info=True)
-            raise
-
-    def rebalance_portfolio(self, current_portfolio, new_top20):
-        try:
-            total_value = self.get_total_portfolio_value(current_portfolio)
-            cash_available = current_portfolio['CASH']
-
-            # Sell stocks not in new top 20
-            for symbol, details in current_portfolio.items():
-                if symbol != 'CASH' and symbol not in new_top20:
-                    order = {
-                        'symbol': symbol,
-                        'action': 'SELL',
-                        'quantity': details['shares']
-                    }
-                    self.execute_order(order)
-                    cash_available += details['shares'] * details['price']
-
-            # Buy or adjust positions for stocks in new top 20
-            remaining_cash = self.calculate_and_execute_orders(
-                {symbol: details['price'] for symbol, details in new_top20.items()},
-                cash_available
-            )
-
-            logger.info("Portfolio rebalancing completed")
-            logger.info(f"Remaining cash: {remaining_cash}")
-        except Exception as e:
-            logger.error(f"Error during portfolio rebalancing: {e}")
-
-    def get_portfolio_summary(self):
-        try:
-            portfolio = self.get_current_portfolio()
-            total_value = self.get_total_portfolio_value(portfolio)
-
-            summary = {
-                'total_value': total_value,
-                'cash': portfolio['CASH'],
-                'positions': {}
-            }
-
-            for symbol, details in portfolio.items():
-                if symbol != 'CASH':
-                    position_value = details['shares'] * details['price']
-                    summary['positions'][symbol] = {
-                        'shares': details['shares'],
-                        'price': details['price'],
-                        'value': position_value,
-                        'weight': (position_value / total_value).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    }
-
-            logger.info(f"Portfolio summary: {summary}")
-            return summary
-        except Exception as e:
-            logger.error(f"Error getting portfolio summary: {e}")
-            raise
-
-    def check_risk_limits(self):
-        try:
-            summary = self.get_portfolio_summary()
-
-            for symbol, details in summary['positions'].items():
-                if details['weight'] > self.MAX_POSITION_SIZE:
-                    logger.warning(f"Position {symbol} exceeds maximum allowed size: {details['weight']}")
-
-            cash_ratio = summary['cash'] / summary['total_value']
-            if cash_ratio < Decimal('0.05'):  # Less than 5% cash
-                logger.warning(f"Cash position is low: {cash_ratio:.2%}")
-
-            logger.info("Risk limit check completed")
-        except Exception as e:
-            logger.error(f"Error checking risk limits: {e}")
+                logger.info(f"Order placed: {order},
