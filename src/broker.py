@@ -1,21 +1,20 @@
 # broker.py
 
+import logging
 import threading
 import time
-import logging
-from datetime import datetime, timedelta
-import pytz
-from decimal import Decimal
-from utils.import_helper import add_vendor_to_path
+
 import exchange_calendars as xcals
 import pandas as pd
+
+from utils.import_helper import add_vendor_to_path
 
 add_vendor_to_path()
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
 from ibapi.order import Order
-from ibapi.common import BarData, MarketDataTypeEnum
+from ibapi.common import BarData
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +111,86 @@ class IBApi(EWrapper, EClient):
 
 
 class IBBroker:
+    # Mapping all possible exchange codes coming in from Tradepost.ai
     EXCHANGE_MAPPING = {
         "US": ("SMART", "USD"),
         "LSE": ("LSEETF", "GBP"),
+        "TO": ("TSX", "CAD"),
+        "V": ("VENTURE", "CAD"),
+        "NEO": ("OMEGA", "CAD"),
+        "BE": ("SBF", "EUR"),
+        "HM": ("SBF", "EUR"),
+        "XETRA": ("IBIS", "EUR"),
+        "DU": ("SBF", "EUR"),
+        "HA": ("SBF", "EUR"),
+        "MU": ("SBF", "EUR"),
+        "STU": ("SBF", "EUR"),
         "F": ("IBIS", "EUR"),
+        "LU": ("SBF", "EUR"),
+        "VI": ("VSE", "EUR"),
+        "PA": ("SBF", "EUR"),
+        "BR": ("EBR", "EUR"),
+        "MC": ("SN", "EUR"),
+        "SW": ("VIRTX", "CHF"),
+        "LS": ("BVL", "EUR"),
+        "AS": ("AEB", "EUR"),
+        "IC": ("ICEX", "ISK"),
+        "IR": ("ISE", "EUR"),
+        "HE": ("HEX", "EUR"),
+        "OL": ("OSE", "NOK"),
+        "CO": ("CSE", "DKK"),
+        "ST": ("SFB", "SEK"),
+        "VFEX": ("VFEX", "ZWL"),
+        "XZIM": ("ZSE", "ZWL"),
+        "LUSE": ("LUSE", "ZMW"),
+        "USE": ("USE", "UGX"),
+        "DSE": ("DSE", "TZS"),
+        "PR": ("PRA", "CZK"),
+        "RSE": ("RSE", "RWF"),
+        "XBOT": ("XBOT", "BWP"),
+        "EGX": ("EGX", "EGP"),
+        "XNSA": ("XNSA", "NGN"),
+        "GSE": ("GSE", "GHS"),
+        "MSE": ("MSE", "MWK"),
+        "BRVM": ("BRVM", "XOF"),
+        "XNAI": ("XNAI", "KES"),
+        "BC": ("BCAS", "MAD"),
+        "SEM": ("SEM", "MUR"),
+        "TA": ("TASE", "ILS"),
+        "KQ": ("KOSDAQ", "KRW"),
         "KO": ("KSE", "KRW"),
-        "T": ("TSE", "JPY"),
-        "HK": ("SEHK", "HKD"),
+        "BUD": ("BUX", "HUF"),
+        "WAR": ("WSE", "PLN"),
+        "PSE": ("PSE", "PHP"),
+        "JK": ("JSX", "IDR"),
+        "AU": ("ASX", "AUD"),
+        "SHG": ("SEHK", "CNY"),
+        "KAR": ("XKAR", "PKR"),
+        "JSE": ("JSE", "ZAR"),
+        "NSE": ("NSE", "INR"),
+        "AT": ("ATH", "EUR"),
+        "SHE": ("SZSE", "CNY"),
+        "SN": ("SNSE", "CLP"),
+        "BK": ("SET", "THB"),
+        "CM": ("CSE", "LKR"),
+        "VN": ("HOSE", "VND"),
+        "KLSE": ("XKLS", "MYR"),
+        "RO": ("BVB", "RON"),
+        "SA": ("BOVESPA", "BRL"),
+        "BA": ("MERVAL", "ARS"),
+        "MX": ("MEXI", "MXN"),
+        "IL": ("LSEETF", "USD"),
+        "ZSE": ("ZSE", "EUR"),
+        "TW": ("TSEC", "TWD"),
+        "TWO": ("TPEX", "TWD"),
+        "EUBOND": ("SMART", "EUR"),
+        "LIM": ("BVL", "PEN"),
+        "GBOND": ("SMART", "USD"),
+        "MONEY": ("SMART", "USD"),
+        "EUFUND": ("SMART", "EUR"),
+        "IS": ("IBIS", "TRY"),
+        "FOREX": ("IDEALPRO", "USD"),
+        "CC": ("PAXOS", "USD")
     }
 
     def __init__(self, host, port, clientId, api_version):
