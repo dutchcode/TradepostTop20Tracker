@@ -341,16 +341,25 @@ class IBBroker:
         else:
             raise ValueError(f"Failed to get market data for {contract.symbol}")
 
-    def place_order(self, symbol, secType, exchange, action, quantity):
+    def place_order(self, symbol, secType, exchange, action, quantity, order_type="MKT", limit_price=None,
+                    stop_price=None, tif="DAY"):
         try:
             self.ensure_connection()
             contract = self.create_contract(symbol, secType, exchange)
 
             order = Order()
             order.action = action
-            order.orderType = "MKT"
             order.totalQuantity = quantity
-            order.cashQty = 0  # Set this to 0 instead of None
+            order.orderType = order_type
+            order.tif = tif
+
+            if order_type == "LMT" and limit_price is not None:
+                order.lmtPrice = limit_price
+            elif order_type == "STP" and stop_price is not None:
+                order.auxPrice = stop_price
+            elif order_type == "STP LMT" and limit_price is not None and stop_price is not None:
+                order.lmtPrice = limit_price
+                order.auxPrice = stop_price
 
             with self.ib.lock:
                 if self.ib.nextorderId is None:
@@ -361,7 +370,8 @@ class IBBroker:
                 orderId = self.ib.nextorderId
                 self.ib.nextorderId += 1
 
-            logger.info(f"Placing order: Symbol={symbol}, Action={action}, Quantity={quantity}, OrderId={orderId}")
+            logger.info(
+                f"Placing order: Symbol={symbol}, Action={action}, Quantity={quantity}, OrderType={order_type}, OrderId={orderId}")
             self.ib.placeOrder(orderId, contract, order)
             logger.info(f"Order placed: {symbol} {action} {quantity}")
             return orderId
@@ -394,3 +404,124 @@ class IBBroker:
         if not self.ib.event.wait(timeout=10):
             raise TimeoutError("Timeout waiting for server time")
         return self.ib.server_time
+
+    def place_bracket_order(self, symbol, secType, exchange, action, quantity, entry_price, take_profit_price,
+                            stop_loss_price):
+        try:
+            self.ensure_connection()
+            contract = self.create_contract(symbol, secType, exchange)
+
+            parent = Order()
+            parent.orderId = self.ib.nextorderId
+            self.ib.nextorderId += 1
+            parent.action = action
+            parent.orderType = "LMT"
+            parent.totalQuantity = quantity
+            parent.lmtPrice = entry_price
+            parent.transmit = False
+
+            takeProfit = Order()
+            takeProfit.orderId = self.ib.nextorderId
+            self.ib.nextorderId += 1
+            takeProfit.action = "SELL" if action == "BUY" else "BUY"
+            takeProfit.orderType = "LMT"
+            takeProfit.totalQuantity = quantity
+            takeProfit.lmtPrice = take_profit_price
+            takeProfit.parentId = parent.orderId
+            takeProfit.transmit = False
+
+            stopLoss = Order()
+            stopLoss.orderId = self.ib.nextorderId
+            self.ib.nextorderId += 1
+            stopLoss.action = "SELL" if action == "BUY" else "BUY"
+            stopLoss.orderType = "STP"
+            stopLoss.totalQuantity = quantity
+            stopLoss.auxPrice = stop_loss_price
+            stopLoss.parentId = parent.orderId
+            stopLoss.transmit = True
+
+            bracketOrder = [parent, takeProfit, stopLoss]
+            for order in bracketOrder:
+                self.ib.placeOrder(order.orderId, contract, order)
+
+            logger.info(f"Bracket order placed: {symbol} {action} {quantity}")
+            return parent.orderId
+        except Exception as e:
+            logger.error(f"Error placing bracket order: {e}", exc_info=True)
+            return None
+
+    def place_trailing_stop_order(self, symbol, secType, exchange, action, quantity, trailing_amount,
+                                  trailing_type="PERCENT"):
+        try:
+            self.ensure_connection()
+            contract = self.create_contract(symbol, secType, exchange)
+
+            order = Order()
+            order.action = action
+            order.orderType = "TRAIL"
+            order.totalQuantity = quantity
+
+            if trailing_type == "PERCENT":
+                order.trailingPercent = trailing_amount
+            else:
+                order.auxPrice = trailing_amount
+
+            with self.ib.lock:
+                if self.ib.nextorderId is None:
+                    logger.error("nextorderId is None. Requesting new valid ID.")
+                    self.ib.reqIds(-1)
+                    if not self.ib.connected.wait(timeout=10):
+                        raise TimeoutError("Timeout waiting for nextorderId")
+                orderId = self.ib.nextorderId
+                self.ib.nextorderId += 1
+
+            logger.info(
+                f"Placing trailing stop order: Symbol={symbol}, Action={action}, Quantity={quantity}, TrailingAmount={trailing_amount}, TrailingType={trailing_type}, OrderId={orderId}")
+            self.ib.placeOrder(orderId, contract, order)
+            logger.info(f"Trailing stop order placed: {symbol} {action} {quantity}")
+            return orderId
+        except Exception as e:
+            logger.error(f"Error placing trailing stop order: {e}", exc_info=True)
+            return None
+
+    def place_oca_order(self, orders):
+        try:
+            self.ensure_connection()
+            oca_orders = []
+            oca_group = f"OCA_{int(time.time())}"
+
+            for order_info in orders:
+                contract = self.create_contract(order_info['symbol'], order_info['secType'], order_info['exchange'])
+                order = Order()
+                order.action = order_info['action']
+                order.orderType = order_info['orderType']
+                order.totalQuantity = order_info['quantity']
+
+                if order.orderType == "LMT":
+                    order.lmtPrice = order_info['price']
+                elif order.orderType == "STP":
+                    order.auxPrice = order_info['price']
+
+                order.ocaGroup = oca_group
+                order.ocaType = 1  # Cancel all remaining orders with block
+
+                with self.ib.lock:
+                    if self.ib.nextorderId is None:
+                        logger.error("nextorderId is None. Requesting new valid ID.")
+                        self.ib.reqIds(-1)
+                        if not self.ib.connected.wait(timeout=10):
+                            raise TimeoutError("Timeout waiting for nextorderId")
+                    orderId = self.ib.nextorderId
+                    self.ib.nextorderId += 1
+
+                order.orderId = orderId
+                oca_orders.append((contract, order))
+
+            for contract, order in oca_orders:
+                self.ib.placeOrder(order.orderId, contract, order)
+
+            logger.info(f"OCA order group {oca_group} placed")
+            return oca_group
+        except Exception as e:
+            logger.error(f"Error placing OCA order: {e}", exc_info=True)
+            return None
