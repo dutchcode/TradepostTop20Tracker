@@ -4,7 +4,8 @@ An open-source bot for InteractiveBrokers that tracks the Tradepost.ai Top20 Ind
 
 ## ⚠️ WARNING: USE WITH CAUTION ⚠️
 
-**IMPORTANT:** This bot will sell ALL stocks in the connected account that are not part of the Tradepost.ai Top20 Index. 
+**IMPORTANT:** This bot will rebalance your portfolio to match the Tradepost.ai Top20 Index. It will sell stocks not in
+the index and buy those that are.
 
 - **DO NOT** connect this bot to an existing account with active positions unless you fully understand and accept the consequences.
 - **ALWAYS** start with paper trading to familiarize yourself with the bot's behavior.
@@ -15,6 +16,14 @@ The authors and contributors of this project are not responsible for any financi
 ## Description
 
 This project implements an automated trading bot that mirrors the Tradepost.ai Top20 Index using an InteractiveBrokers account. It's designed for educational and demonstration purposes to showcase the practical application of the Tradepost.ai API.
+
+## Key Features
+
+- Daily rebalancing to match the Tradepost.ai Top20 Index
+- Uses limit orders to avoid market impact
+- Implements a "sell first, then buy" strategy to ensure cash availability
+- Respects a maximum position size of 30% of the portfolio
+- Maintains a configurable cash buffer
 
 ## Prerequisites
 
