@@ -33,6 +33,7 @@ class IBApi(EWrapper, EClient):
         self.last_price = None
         self.symbol_search_results = []
         self.server_time = None
+        self.real_time_data_available = None
 
     def nextValidId(self, orderId: int):
         super().nextValidId(orderId)
@@ -301,13 +302,19 @@ class IBBroker:
         contract_details = self.ib.contract_details[req_id][0]
         logger.info(f"Found contract: {contract_details.contract}")
 
-        # Try to get real-time data first
-        try:
-            return self.get_market_data_price(contract_details.contract)
-        except Exception as e:
-            logger.warning(f"Failed to get real-time data for {symbol}: {e}. Trying historical data...")
+        # Check for real-time data availability
+        real_time_available = self.check_real_time_data_availability(contract_details.contract)
 
-        # If real-time data fails, try historical data
+        if real_time_available:
+            logger.info(f"Real-time data available for {symbol}")
+            try:
+                return self.get_market_data_price(contract_details.contract)
+            except Exception as e:
+                logger.warning(f"Failed to get real-time data for {symbol}: {e}. Falling back to historical data.")
+        else:
+            logger.info(f"Real-time data not available for {symbol}. Using historical data.")
+
+        # If real-time data is not available or failed, use historical data
         try:
             self.ib.event.clear()
             self.ib.reqHistoricalData(req_id, contract_details.contract, "", "1 D", "1 min", "TRADES", 1, 1, False, [])
@@ -374,6 +381,7 @@ class IBBroker:
                 f"Placing order: Symbol={symbol}, Action={action}, Quantity={quantity}, OrderType={order_type}, OrderId={orderId}")
             self.ib.placeOrder(orderId, contract, order)
             logger.info(f"Order placed: {symbol} {action} {quantity}")
+
             return orderId
         except Exception as e:
             logger.error(f"Error placing order: {e}", exc_info=True)
@@ -525,3 +533,27 @@ class IBBroker:
         except Exception as e:
             logger.error(f"Error placing OCA order: {e}", exc_info=True)
             return None
+
+
+    def check_real_time_data_availability(self, contract):
+        req_id = self.next_req_id
+        self.next_req_id += 1
+        self.ib.real_time_data_available = None
+        self.ib.event.clear()
+
+        def handle_market_data_type(req_id, market_data_type):
+            self.ib.real_time_data_available = (market_data_type == 1)  # 1 for real-time, 2 for frozen
+            self.ib.event.set()
+
+        self.ib.reqMarketDataType(4)  # Request delayed data
+        self.ib.reqMktData(req_id, contract, "", False, False, [])
+
+        # Set up the callback
+        self.ib.marketDataTypeHandler = handle_market_data_type
+
+        if not self.ib.event.wait(timeout=5):
+            logger.warning(f"Timeout checking real-time data availability for {contract.symbol}")
+            return False
+
+        self.ib.cancelMktData(req_id)
+        return self.ib.real_time_data_available

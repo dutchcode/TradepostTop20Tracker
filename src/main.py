@@ -13,7 +13,7 @@ add_vendor_to_path()
 from config import CONFIG
 from tradepost_api import TradepostAPI
 from broker import IBBroker
-import portfolio_manager
+from portfolio_manager import PortfolioManager
 
 # Set root logger to INFO
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -93,16 +93,6 @@ def get_unique_markets_and_times(processed_top20, broker):
         market_times[market] = next_open
     return market_times
 
-def calculate_quantities(cash, prices, max_position_size):
-    total_value = sum(prices.values())
-    target_value_per_stock = min(cash / len(prices), total_value * max_position_size)
-    quantities = {}
-    for symbol, price in prices.items():
-        quantity = int(target_value_per_stock / price)
-        if quantity > 0:
-            quantities[symbol] = quantity
-    return quantities
-
 def main():
     logger.info("Starting the TradepostTop20Tracker")
 
@@ -120,7 +110,7 @@ def main():
         return
 
     broker = IBBroker(ib_config['host'], ib_config['port'], ib_config['client_id'], ib_config['api_version'])
-    pm = portfolio_manager.PortfolioManager(broker, CONFIG)
+    pm = PortfolioManager(broker, CONFIG)
 
     try:
         logger.info("Attempting to connect to Interactive Brokers")
@@ -167,21 +157,7 @@ def main():
 
                     if current_prices:
                         # Calculate quantities and place orders for the current market
-                        current_portfolio = pm.get_current_portfolio()
-                        cash_available = current_portfolio['CASH']
-                        quantities = calculate_quantities(cash_available, current_prices, CONFIG.get('trading.max_position_size'))
-
-                        logger.info(f"Placing orders for {exchange} market:")
-                        for symbol, quantity in quantities.items():
-                            if quantity > 0:
-                                order = {
-                                    'symbol': symbol,
-                                    'action': 'BUY',
-                                    'quantity': quantity,
-                                    'price': current_prices[symbol]
-                                }
-                                pm.execute_order(order)
-                                logger.info(f"Placed order: {order}")
+                        pm.calculate_and_execute_orders(current_prices)
 
                     if remaining_stocks:
                         next_market_open = min(broker.get_next_market_open(data['exchange'])
@@ -206,8 +182,7 @@ def main():
                 logger.debug(f"Valid Top20 data with prices: {valid_top20}")
 
                 # After processing all markets, update the portfolio
-                updated_portfolio = pm.get_current_portfolio()
-                logger.info(f"Updated portfolio: {updated_portfolio}")
+                pm.rebalance_portfolio(valid_top20)
 
                 # Wait before the next iteration
                 time.sleep(3600)  # Wait for 1 hour before the next check

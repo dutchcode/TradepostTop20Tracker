@@ -13,6 +13,7 @@ class PortfolioManager:
         self.ACCOUNT = config.get('interactive_brokers.account')
         self.MAX_POSITION_SIZE = Decimal(
             str(config.get('trading.max_position_size', '0.3')))  # 30% of portfolio by default
+        self.MAX_ORDER_SIZE = config.get('trading.max_order_size', 500)
         self.SELL_ORDER_CHECK_INTERVAL = 60  # Check sell order status every 60 seconds
         self.SELL_ORDER_TIMEOUT = 3600  # Wait for a maximum of 1 hour for sell orders to complete
 
@@ -49,6 +50,7 @@ class PortfolioManager:
     def calculate_rebalance_orders(self, current_portfolio, new_top20):
         try:
             total_value = self.get_total_portfolio_value(current_portfolio)
+            cash = current_portfolio['CASH']
             target_position_value = min((total_value - self.CASH_BUFFER) / Decimal('20'),
                                         total_value * self.MAX_POSITION_SIZE)
 
@@ -57,66 +59,99 @@ class PortfolioManager:
 
             logger.debug(f"Current portfolio: {current_portfolio}")
             logger.debug(f"New top 20: {new_top20}")
+            logger.info(f"Total portfolio value: {total_value}")
+            logger.info(f"Current cash: {cash}")
+            logger.info(f"Target position value: {target_position_value}")
 
-            # Identify stocks to sell (not in new top 20)
+            # Identify stocks to sell (not in new top 20 or exceeding max position size)
             for symbol, details in current_portfolio.items():
-                if symbol != 'CASH' and symbol not in new_top20:
-                    sell_orders.append({
-                        'symbol': symbol,
-                        'action': 'SELL',
-                        'shares': details['shares'],
-                        'orderType': 'LMT',
-                        'lmtPrice': details['price'] * Decimal('0.99')  # Set limit price 1% below current price
-                    })
-
-            # Calculate available cash after selling
-            cash_after_selling = current_portfolio['CASH'] + sum(
-                current_portfolio[order['symbol']]['shares'] * current_portfolio[order['symbol']]['price']
-                for order in sell_orders
-            )
-
-            # Identify stocks to buy or add to
-            valid_new_stocks = [symbol for symbol, details in new_top20.items() if details.get('price') is not None]
-            if not valid_new_stocks:
-                logger.warning("No stocks with valid price information in new Top20. Skipping buy orders.")
-                return sell_orders, []
-
-            for symbol in valid_new_stocks:
-                details = new_top20[symbol]
-                price = Decimal(str(details['price']))
-                current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
-                current_value = current_shares * price
-                target_value = min(target_position_value, cash_after_selling / len(valid_new_stocks))
-
-                if current_value < target_value:
-                    shares_to_buy = ((target_value - current_value) / price).quantize(Decimal('0.0001'),
-                                                                                      rounding=ROUND_DOWN)
-                    if shares_to_buy > Decimal('0'):
-                        buy_orders.append({
-                            'symbol': symbol,
-                            'action': 'BUY',
-                            'shares': shares_to_buy,
-                            'orderType': 'LMT',
-                            'lmtPrice': price * Decimal('1.01')  # Set limit price 1% above current price
-                        })
-                        cash_after_selling -= shares_to_buy * price
-                elif current_value > target_value:
-                    shares_to_sell = ((current_value - target_value) / price).quantize(Decimal('0.0001'),
-                                                                                       rounding=ROUND_DOWN)
-                    if shares_to_sell > Decimal('0'):
+                if symbol != 'CASH':
+                    current_value = details['shares'] * details['price']
+                    if symbol not in new_top20:
+                        logger.info(f"Selling {symbol} (not in new top 20): {details['shares']} shares")
                         sell_orders.append({
                             'symbol': symbol,
                             'action': 'SELL',
-                            'shares': shares_to_sell,
-                            'orderType': 'LMT',
-                            'lmtPrice': price * Decimal('0.99')  # Set limit price 1% below current price
+                            'shares': details['shares'],
+                            'orderType': 'MKT'
                         })
-                        cash_after_selling += shares_to_sell * price
+                    elif current_value > target_position_value * self.MAX_POSITION_SIZE:
+                        shares_to_sell = ((current_value - target_position_value * self.MAX_POSITION_SIZE) / details[
+                            'price']).quantize(Decimal('1'), rounding=ROUND_DOWN)
+                        if shares_to_sell > 0:
+                            logger.info(
+                                f"Selling excess shares of {symbol}: {shares_to_sell} shares (current value: {current_value}, max allowed: {target_position_value * self.MAX_POSITION_SIZE})")
+                            sell_orders.append({
+                                'symbol': symbol,
+                                'action': 'SELL',
+                                'shares': shares_to_sell,
+                                'orderType': 'MKT'
+                            })
 
+            # Calculate available cash after selling
+            cash_after_selling = cash + sum(
+                current_portfolio[order['symbol']]['price'] * order['shares']
+                for order in sell_orders
+            )
+
+            logger.info(f"Cash available after selling: {cash_after_selling}")
+
+            # Check which stocks we can't afford a single share of
+            unaffordable_stocks = []
+            for symbol, details in new_top20.items():
+                price = Decimal(str(details['price']))
+                if price > cash_after_selling:
+                    unaffordable_stocks.append(symbol)
+                    logger.warning(
+                        f"Cannot afford a single share of {symbol}. Share price: {price}, Available cash: {cash_after_selling}")
+
+            # Identify stocks to buy or add to
+            for symbol, details in new_top20.items():
+                price = Decimal(str(details['price']))
+                current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
+                current_value = current_shares * price
+
+                if current_value < target_position_value * Decimal(
+                        '0.98'):  # Only buy if position is less than 98% of target
+                    shares_to_buy = ((target_position_value - current_value) / price).quantize(Decimal('1'),
+                                                                                               rounding=ROUND_DOWN)
+                    if shares_to_buy > 0:
+                        if cash_after_selling >= price:  # Check if we can afford at least one share
+                            actual_shares_to_buy = min(shares_to_buy, cash_after_selling // price)
+                            logger.info(
+                                f"Buying {symbol}: {actual_shares_to_buy} shares (current value: {current_value}, target: {target_position_value})")
+                            buy_orders.append({
+                                'symbol': symbol,
+                                'action': 'BUY',
+                                'shares': actual_shares_to_buy,
+                                'orderType': 'MKT'
+                            })
+                            cash_after_selling -= actual_shares_to_buy * price
+                        else:
+                            logger.warning(
+                                f"Not enough cash to buy even one share of {symbol}. Share price: {price}, Available cash: {cash_after_selling}")
+
+            logger.info(f"Remaining cash after order calculations: {cash_after_selling}")
             logger.info(f"Sell orders: {sell_orders}")
             logger.info(f"Buy orders: {buy_orders}")
+            logger.info(f"Stocks we couldn't afford a single share of: {unaffordable_stocks}")
 
-            return sell_orders, buy_orders
+            # Filter out zero-sized sell orders
+            sell_orders = [order for order in sell_orders if order['shares'] > 0]
+
+            # Split large buy orders into smaller chunks
+            chunked_buy_orders = []
+            for order in buy_orders:
+                if order['shares'] > self.MAX_ORDER_SIZE:
+                    chunks = self.split_order(order)
+                    chunked_buy_orders.extend(chunks)
+                else:
+                    chunked_buy_orders.append(order)
+
+            logger.info(f"Final sell orders: {sell_orders}")
+            logger.info(f"Final buy orders (chunked): {chunked_buy_orders}")
+
+            return sell_orders, chunked_buy_orders
 
         except InvalidOperation as e:
             logger.error(f"Error in calculate_rebalance_orders: {e}")
@@ -127,58 +162,97 @@ class PortfolioManager:
             logger.error(f"Unexpected error in calculate_rebalance_orders: {e}")
             raise
 
+    def split_order(self, order):
+        chunks = []
+        remaining_shares = order['shares']
+        while remaining_shares > 0:
+            chunk_size = min(remaining_shares, self.MAX_ORDER_SIZE)
+            chunks.append({
+                'symbol': order['symbol'],
+                'action': order['action'],
+                'shares': chunk_size,
+                'orderType': order['orderType']
+            })
+            remaining_shares -= chunk_size
+        return chunks
+
     def execute_order(self, order):
         try:
             exchange = self.broker.EXCHANGE_MAPPING.get(order['symbol'], ('SMART', 'USD'))[0]
             next_market_open = self.broker.get_next_market_open(exchange)
 
-            order_id = self.broker.place_order(
-                symbol=order['symbol'],
-                secType='STK',
-                exchange='SMART',
-                action=order['action'],
-                quantity=float(order['shares']),
-                order_type=order['orderType'],
-                limit_price=float(order['lmtPrice']),
-                tif='GTC'
-            )
+            remaining_shares = order['shares']
+            while remaining_shares > 0:
+                chunk_size = min(remaining_shares, self.MAX_ORDER_SIZE)
 
-            if order_id is not None:
-                logger.info(f"Executed order: {order}, Order ID: {order_id}")
-            else:
-                logger.error(f"Failed to execute order: {order}. Order ID is None.")
+                order_id = self.broker.place_order(
+                    symbol=order['symbol'],
+                    secType='STK',
+                    exchange='SMART',
+                    action=order['action'],
+                    quantity=int(chunk_size),
+                    order_type=order['orderType']
+                )
+
+                if order_id is not None:
+                    logger.info(
+                        f"Executed order chunk: {order['symbol']} {order['action']} {chunk_size}, Order ID: {order_id}")
+                else:
+                    logger.error(
+                        f"Failed to execute order chunk: {order['symbol']} {order['action']} {chunk_size}. Order ID is None.")
+
+                remaining_shares -= chunk_size
+
+            logger.info(f"Completed execution of order: {order}")
         except Exception as e:
             logger.error(f"Error executing order {order}: {e}", exc_info=True)
 
-    def calculate_and_execute_orders(self, current_prices, cash_available):
+    def rebalance_portfolio(self, new_top20):
         try:
-            total_value = sum(current_prices.values())
+            current_portfolio = self.get_current_portfolio()
+            sell_orders, buy_orders = self.calculate_rebalance_orders(current_portfolio, new_top20)
+
+            # Execute sell orders first
+            for order in sell_orders:
+                self.execute_order(order)
+
+            # Then execute buy orders
+            for order in buy_orders:
+                self.execute_order(order)
+
+            logger.info("Portfolio rebalancing completed")
+        except Exception as e:
+            logger.error(f"Error rebalancing portfolio: {e}", exc_info=True)
+            raise
+
+    def calculate_and_execute_orders(self, current_prices):
+        try:
+            current_portfolio = self.get_current_portfolio()
+            total_value = self.get_total_portfolio_value(current_portfolio)
+            cash_available = current_portfolio['CASH'] - self.CASH_BUFFER
+
             target_value_per_stock = min(cash_available / len(current_prices),
                                          total_value * self.MAX_POSITION_SIZE)
 
-            queued_orders = []
             for symbol, price in current_prices.items():
-                quantity = int(target_value_per_stock / price)
-                if quantity > 0:
-                    order = {
-                        'symbol': symbol,
-                        'action': 'BUY',
-                        'quantity': quantity,
-                        'price': price
-                    }
-                    exchange = self.broker.EXCHANGE_MAPPING.get(symbol, ('SMART', 'USD'))[0]
-                    if self.broker.is_market_open(exchange):
-                        self.execute_order(order)
-                    else:
-                        queued_orders.append(order)
-                        logger.info(f"Market closed for {symbol}. Order queued: {order}")
+                current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
+                current_value = current_shares * Decimal(str(price))
 
-            if queued_orders:
-                logger.info(f"Queued orders for later execution: {queued_orders}")
-                # Here you could implement a mechanism to execute these orders when the market opens
+                if current_value < target_value_per_stock * Decimal('0.98'):
+                    shares_to_buy = ((target_value_per_stock - current_value) / Decimal(str(price))).quantize(
+                        Decimal('0.0001'),
+                        rounding=ROUND_DOWN)
+                    if shares_to_buy > Decimal('0'):
+                        order = {
+                            'symbol': symbol,
+                            'action': 'BUY',
+                            'shares': shares_to_buy,
+                            'orderType': 'MKT'
+                        }
+                        self.execute_order(order)
+                        cash_available -= shares_to_buy * Decimal(str(price))
 
             logger.info(f"Remaining cash after order calculations: {cash_available}")
-            return cash_available
         except Exception as e:
             logger.error(f"Error calculating and executing orders: {e}", exc_info=True)
             raise
