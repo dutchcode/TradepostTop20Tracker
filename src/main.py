@@ -120,7 +120,7 @@ def main():
         return
 
     broker = IBBroker(ib_config['host'], ib_config['port'], ib_config['client_id'], ib_config['api_version'])
-    pm = portfolio_manager.PortfolioManager(broker)
+    pm = portfolio_manager.PortfolioManager(broker, CONFIG)
 
     try:
         logger.info("Attempting to connect to Interactive Brokers")

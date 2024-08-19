@@ -149,3 +149,36 @@ class PortfolioManager:
                 logger.error(f"Failed to execute order: {order}. Order ID is None.")
         except Exception as e:
             logger.error(f"Error executing order {order}: {e}", exc_info=True)
+
+    def calculate_and_execute_orders(self, current_prices, cash_available):
+        try:
+            total_value = sum(current_prices.values())
+            target_value_per_stock = min(cash_available / len(current_prices),
+                                         total_value * self.MAX_POSITION_SIZE)
+
+            queued_orders = []
+            for symbol, price in current_prices.items():
+                quantity = int(target_value_per_stock / price)
+                if quantity > 0:
+                    order = {
+                        'symbol': symbol,
+                        'action': 'BUY',
+                        'quantity': quantity,
+                        'price': price
+                    }
+                    exchange = self.broker.EXCHANGE_MAPPING.get(symbol, ('SMART', 'USD'))[0]
+                    if self.broker.is_market_open(exchange):
+                        self.execute_order(order)
+                    else:
+                        queued_orders.append(order)
+                        logger.info(f"Market closed for {symbol}. Order queued: {order}")
+
+            if queued_orders:
+                logger.info(f"Queued orders for later execution: {queued_orders}")
+                # Here you could implement a mechanism to execute these orders when the market opens
+
+            logger.info(f"Remaining cash after order calculations: {cash_available}")
+            return cash_available
+        except Exception as e:
+            logger.error(f"Error calculating and executing orders: {e}", exc_info=True)
+            raise
