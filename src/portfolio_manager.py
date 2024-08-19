@@ -11,11 +11,10 @@ class PortfolioManager:
         self.broker = broker
         self.CASH_BUFFER = Decimal(str(config.get('trading.cash_buffer', '50')))
         self.ACCOUNT = config.get('interactive_brokers.account')
-        self.MAX_POSITION_SIZE = Decimal(
-            str(config.get('trading.max_position_size', '0.3')))  # 30% of portfolio by default
+        self.MAX_POSITION_SIZE = Decimal(str(config.get('trading.max_position_size', '0.3')))
         self.MAX_ORDER_SIZE = config.get('trading.max_order_size', 500)
-        self.SELL_ORDER_CHECK_INTERVAL = 60  # Check sell order status every 60 seconds
-        self.SELL_ORDER_TIMEOUT = 3600  # Wait for a maximum of 1 hour for sell orders to complete
+        self.SELL_ORDER_CHECK_INTERVAL = 60
+        self.SELL_ORDER_TIMEOUT = 3600
 
     def get_current_portfolio(self):
         try:
@@ -96,27 +95,17 @@ class PortfolioManager:
 
             logger.info(f"Cash available after selling: {cash_after_selling}")
 
-            # Check which stocks we can't afford a single share of
-            unaffordable_stocks = []
-            for symbol, details in new_top20.items():
-                price = Decimal(str(details['price']))
-                if price > cash_after_selling:
-                    unaffordable_stocks.append(symbol)
-                    logger.warning(
-                        f"Cannot afford a single share of {symbol}. Share price: {price}, Available cash: {cash_after_selling}")
-
             # Identify stocks to buy or add to
             for symbol, details in new_top20.items():
                 price = Decimal(str(details['price']))
                 current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
                 current_value = current_shares * price
 
-                if current_value < target_position_value * Decimal(
-                        '0.98'):  # Only buy if position is less than 98% of target
+                if current_value < target_position_value * Decimal('0.98'):
                     shares_to_buy = ((target_position_value - current_value) / price).quantize(Decimal('1'),
                                                                                                rounding=ROUND_DOWN)
                     if shares_to_buy > 0:
-                        if cash_after_selling >= price:  # Check if we can afford at least one share
+                        if cash_after_selling >= price:
                             actual_shares_to_buy = min(shares_to_buy, cash_after_selling // price)
                             logger.info(
                                 f"Buying {symbol}: {actual_shares_to_buy} shares (current value: {current_value}, target: {target_position_value})")
@@ -130,28 +119,18 @@ class PortfolioManager:
                         else:
                             logger.warning(
                                 f"Not enough cash to buy even one share of {symbol}. Share price: {price}, Available cash: {cash_after_selling}")
+                    else:
+                        logger.info(
+                            f"No need to buy {symbol}. Current value ({current_value}) is close to or exceeds target ({target_position_value * Decimal('0.98')}).")
+                else:
+                    logger.info(
+                        f"Skipping {symbol}. Current value ({current_value}) exceeds 98% of target ({target_position_value * Decimal('0.98')}).")
 
             logger.info(f"Remaining cash after order calculations: {cash_after_selling}")
             logger.info(f"Sell orders: {sell_orders}")
             logger.info(f"Buy orders: {buy_orders}")
-            logger.info(f"Stocks we couldn't afford a single share of: {unaffordable_stocks}")
 
-            # Filter out zero-sized sell orders
-            sell_orders = [order for order in sell_orders if order['shares'] > 0]
-
-            # Split large buy orders into smaller chunks
-            chunked_buy_orders = []
-            for order in buy_orders:
-                if order['shares'] > self.MAX_ORDER_SIZE:
-                    chunks = self.split_order(order)
-                    chunked_buy_orders.extend(chunks)
-                else:
-                    chunked_buy_orders.append(order)
-
-            logger.info(f"Final sell orders: {sell_orders}")
-            logger.info(f"Final buy orders (chunked): {chunked_buy_orders}")
-
-            return sell_orders, chunked_buy_orders
+            return sell_orders, buy_orders
 
         except InvalidOperation as e:
             logger.error(f"Error in calculate_rebalance_orders: {e}")
@@ -161,20 +140,6 @@ class PortfolioManager:
         except Exception as e:
             logger.error(f"Unexpected error in calculate_rebalance_orders: {e}")
             raise
-
-    def split_order(self, order):
-        chunks = []
-        remaining_shares = order['shares']
-        while remaining_shares > 0:
-            chunk_size = min(remaining_shares, self.MAX_ORDER_SIZE)
-            chunks.append({
-                'symbol': order['symbol'],
-                'action': order['action'],
-                'shares': chunk_size,
-                'orderType': order['orderType']
-            })
-            remaining_shares -= chunk_size
-        return chunks
 
     def execute_order(self, order):
         try:
@@ -214,11 +179,17 @@ class PortfolioManager:
 
             # Execute sell orders first
             for order in sell_orders:
-                self.execute_order(order)
+                if order['shares'] > 0:
+                    self.execute_order(order)
+                else:
+                    logger.warning(f"Skipping sell order with zero shares: {order}")
 
             # Then execute buy orders
             for order in buy_orders:
-                self.execute_order(order)
+                if order['shares'] > 0:
+                    self.execute_order(order)
+                else:
+                    logger.warning(f"Skipping buy order with zero shares: {order}")
 
             logger.info("Portfolio rebalancing completed")
         except Exception as e:
@@ -240,9 +211,9 @@ class PortfolioManager:
 
                 if current_value < target_value_per_stock * Decimal('0.98'):
                     shares_to_buy = ((target_value_per_stock - current_value) / Decimal(str(price))).quantize(
-                        Decimal('0.0001'),
+                        Decimal('1'),
                         rounding=ROUND_DOWN)
-                    if shares_to_buy > Decimal('0'):
+                    if shares_to_buy > 0:
                         order = {
                             'symbol': symbol,
                             'action': 'BUY',
@@ -251,6 +222,12 @@ class PortfolioManager:
                         }
                         self.execute_order(order)
                         cash_available -= shares_to_buy * Decimal(str(price))
+                    else:
+                        logger.info(
+                            f"No need to buy {symbol}. Current value ({current_value}) is close to target ({target_value_per_stock}).")
+                else:
+                    logger.info(
+                        f"Skipping {symbol}. Current value ({current_value}) exceeds 98% of target ({target_value_per_stock * Decimal('0.98')}).")
 
             logger.info(f"Remaining cash after order calculations: {cash_available}")
         except Exception as e:
