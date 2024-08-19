@@ -144,4 +144,8 @@ class PortfolioManager:
             )
 
             if order_id is not None:
-                logger.info(f"Order placed: {order},
+                logger.info(f"Executed order: {order}, Order ID: {order_id}")
+            else:
+                logger.error(f"Failed to execute order: {order}. Order ID is None.")
+        except Exception as e:
+            logger.error(f"Error executing order {order}: {e}", exc_info=True)
