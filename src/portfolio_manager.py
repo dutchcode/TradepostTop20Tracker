@@ -12,7 +12,7 @@ class PortfolioManager:
         self.CASH_BUFFER = Decimal(str(config.get('trading.cash_buffer', '50')))
         self.ACCOUNT = config.get('interactive_brokers.account')
         self.MAX_POSITION_SIZE = Decimal(str(config.get('trading.max_position_size', '0.3')))
-        self.MAX_ORDER_SIZE = config.get('trading.max_order_size', 500)
+        self.MAX_ORDER_SIZE = config.get('trading.max_order_size', 50000)
         self.SELL_ORDER_CHECK_INTERVAL = 60
         self.SELL_ORDER_TIMEOUT = 3600
 
@@ -95,7 +95,6 @@ class PortfolioManager:
 
             logger.info(f"Cash available after selling: {cash_after_selling}")
 
-            # Identify stocks to buy or add to
             for symbol, details in new_top20.items():
                 price = Decimal(str(details['price']))
                 current_shares = current_portfolio.get(symbol, {}).get('shares', Decimal('0'))
@@ -107,21 +106,21 @@ class PortfolioManager:
                     if shares_to_buy > 0:
                         if cash_after_selling >= price:
                             actual_shares_to_buy = min(shares_to_buy, cash_after_selling // price)
+                            limit_price = (price * Decimal('1.02')).quantize(Decimal('0.01'),
+                                                                             rounding=ROUND_DOWN)  # 2% above current price
                             logger.info(
-                                f"Buying {symbol}: {actual_shares_to_buy} shares (current value: {current_value}, target: {target_position_value})")
+                                f"Buying {symbol}: {actual_shares_to_buy} shares at limit price {limit_price} (current price: {price})")
                             buy_orders.append({
                                 'symbol': symbol,
                                 'action': 'BUY',
                                 'shares': actual_shares_to_buy,
-                                'orderType': 'MKT'
+                                'orderType': 'LMT',
+                                'limit_price': limit_price
                             })
                             cash_after_selling -= actual_shares_to_buy * price
                         else:
                             logger.warning(
                                 f"Not enough cash to buy even one share of {symbol}. Share price: {price}, Available cash: {cash_after_selling}")
-                    else:
-                        logger.info(
-                            f"No need to buy {symbol}. Current value ({current_value}) is close to or exceeds target ({target_position_value * Decimal('0.98')}).")
                 else:
                     logger.info(
                         f"Skipping {symbol}. Current value ({current_value}) exceeds 98% of target ({target_position_value * Decimal('0.98')}).")

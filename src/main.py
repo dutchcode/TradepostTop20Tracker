@@ -116,6 +116,10 @@ def main():
         logger.info("Attempting to connect to Interactive Brokers")
         broker.connect()
 
+        # Cancel all open orders
+        broker.cancel_all_orders()
+        logger.info("Cancelled all open orders")
+
         while True:
             try:
                 if not broker.is_connected():
